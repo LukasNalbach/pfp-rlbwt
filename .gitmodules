@@ -1,0 +1,6 @@
+[submodule "external/string-utils"]
+	path = external/string-utils
+	url = ../string-utils.git
+[submodule "external/move-data-structure"]
+	path = external/move-data-structure
+	url = ../move-data-structure.git
