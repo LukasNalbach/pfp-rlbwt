@@ -33,9 +33,7 @@
 #include <omp.h>
 
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
-#include <limits>
 #include <string>
 
 #include <misc/compressor_cli.hpp>
@@ -44,9 +42,6 @@
 #include <pfp_rlbwt/comp/pfp_rlbwt_comp.hpp>
 
 namespace {
-
-// number of significant digits of the printed bits per input symbol
-constexpr int bits_per_symbol_digits = 4;
 
 constexpr compressor_spec spec {
     .name = "pfp-rlbwt-comp",
@@ -61,8 +56,8 @@ void compress(compressor_cli_t& cli)
     const pfp_rlbwt::comp::byte_text text(cli.path_input_file);
     const uint64_t n = text.size();
     log_out() << "compressing " << cli.path_input_file << (cli.fasta ? " as a FASTA file" : "") << " ("
-              << format_size(n) << ") using " << format_threads(cli.threads) << std::endl;
-    log_out() << "output: " << cli.path_output_file << std::endl << std::endl;
+              << format_size(n) << ") into its RLBWT with " << format_threads(cli.threads) << std::endl;
+    log_out() << "output: " << cli.path_output_file << std::endl;
 
     const uint64_t baseline = malloc_count_current();
     malloc_count_reset_peak();
@@ -72,33 +67,14 @@ void compress(compressor_cli_t& cli)
         { .num_threads = cli.threads, .fasta = cli.fasta, .log = cli.log });
     const uint64_t time_ns = time_diff_ns(time_start, now());
     const uint64_t peak = overall_peak() - baseline;
-
-    log_out() << std::endl;
-
-    if (cli.fasta) {
-        log_out() << format_number(res.num_records) << " records, sequence length "
-                  << format_number(res.sequence_length) << std::endl;
-    }
-
+    if (cli.fasta) log_out() << format_number(res.num_records) << " records" << std::endl;
     log_out() << "n = " << format_number(res.sequence_length) << ", sigma = " << res.sigma << ", r = "
               << format_number(res.r) << ", n/r = "
-              << format_ratio(double(res.sequence_length) / double(std::max<uint64_t>(1, res.r))) << ", "
-              << format_number(res.num_start_pairs) << " start pairs" << std::endl;
-    log_out() << "header: " << format_size(res.header_bytes) << ", start pairs: " << format_size(res.start_pair_bytes)
-              << ", run symbols: " << format_size(res.symbol_bytes) << ", run lengths: "
-              << format_size(res.length_bytes);
-    if (cli.fasta) {
-        log_out() << ", headers: " << format_size(res.fasta_header_bytes) << ", line layout: "
-                  << format_size(res.fasta_layout_bytes);
-    }
-    log_out() << std::endl;
+              << format_ratio(double(res.sequence_length) / double(std::max<uint64_t>(1, res.r))) << std::endl;
     log_out() << "compression time: " << format_time(time_ns) << " (" << format_throughput(n, time_ns) << ")"
               << std::endl;
     if constexpr (is_malloc_count_linked) log_peak_memory_usage("peak memory usage", peak, n);
     log_compression_ratio(res.file_bytes, n);
-    log_out() << "bits per input symbol: " << std::setprecision(bits_per_symbol_digits)
-              << double(std::numeric_limits<uint8_t>::digits * res.file_bytes) / double(std::max<uint64_t>(1, n))
-              << std::endl;
 
     if (cli.measurement_file.is_open()) {
         result_line(cli.measurement_file)
@@ -128,8 +104,8 @@ void compress(compressor_cli_t& cli)
 // restores the text of the input file into the output file
 void decompress(compressor_cli_t& cli)
 {
-    log_out() << "decompressing " << cli.path_input_file << " using " << format_threads(cli.threads) << std::endl;
-    log_out() << "output: " << cli.path_output_file << std::endl << std::endl;
+    log_out() << "decompressing " << cli.path_input_file << " with " << format_threads(cli.threads) << std::endl;
+    log_out() << "output: " << cli.path_output_file << std::endl;
 
     const uint64_t baseline = malloc_count_current();
     malloc_count_reset_peak();
@@ -139,7 +115,7 @@ void decompress(compressor_cli_t& cli)
     const uint64_t time_ns = time_diff_ns(time_start, now());
     const uint64_t peak = overall_peak() - baseline;
 
-    log_out() << std::endl << "decompression time: " << format_time(time_ns) << " ("
+    log_out() << "decompression time: " << format_time(time_ns) << " ("
               << format_throughput(n, time_ns) << ")" << std::endl;
     if constexpr (is_malloc_count_linked) log_peak_memory_usage("peak memory usage", peak, n);
 

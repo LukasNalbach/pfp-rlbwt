@@ -140,7 +140,7 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
     std::chrono::steady_clock::time_point time;
     const uint16_t p = prm.num_threads;
 
-    log_phase_start(prm.log, time, "spilling the phrase runs");
+    log_phase_start(prm.log, time, "storing the phrase runs");
     phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p);
     log_phase_end(prm.log, time);
 
@@ -232,8 +232,7 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
         const uint64_t pfp_size = res.num_phrases + res.dictionary_size;
         std::ostringstream ratio;
         ratio << std::fixed << std::setprecision(2) << double(n) / double(pfp_size);
-        std::cout << "|P| = " << format_number(res.num_phrases) << " in " << format_number(res.num_phrase_runs)
-                  << " phrase runs; sigma(P) = " << format_number(res.num_words)
+        std::cout << "|P| = " << format_number(res.num_phrases) << "; sigma(P) = " << format_number(res.num_words)
                   << "; |D| = " << format_number(res.dictionary_size) << std::endl
                   << "|PFP| = |P| + |D| = " << format_number(pfp_size) << "; n / |PFP| = " << ratio.str() << std::endl;
     }
