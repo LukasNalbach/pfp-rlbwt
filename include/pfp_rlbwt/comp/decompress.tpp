@@ -559,7 +559,7 @@ inline uint64_t decompress_into(const no_init_vector<uint8_t>& file, const decom
     const fasta_section section = fasta_section::read(in);
     decompressor text(in, params);
     auto time = now();
-    log_phase_start(params.log, time, "reverting the BWT and restoring the FASTA file");
+    log_phase_start(params.log, time, "reverting the BWT");
     fasta_restorer restorer(section, out);
     text.revert_in_order([&](const char* bytes, uint64_t len) { restorer.append(bytes, len); }, p, params.num_strands);
     restorer.finish();

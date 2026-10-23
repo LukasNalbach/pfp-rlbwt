@@ -233,7 +233,7 @@ void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& param
     const uint64_t r = expected.sym.size();
     const bool sa = params.write_sa_samples, lcp = params.write_lcp_samples;
     const bool plain = params.format == pfp_rlbwt::file_format::plain;
-    const uint8_t position_bytes = pfp_rlbwt::byte_width(n);
+    const uint8_t position_bytes = byte_width(n);
     EXPECT_EQ(result.n_with_terminator, n);
     ASSERT_EQ(result.r, r);
 
@@ -413,7 +413,7 @@ std::vector<sym_t> random_text(bool repetitive)
 
     for (uint64_t c = 0; c < sigma; c++) {
         alphabet.push_back(sizeof(sym_t) == 1 || random_in(0, 1) == 0 ? sym_t(pfp_rlbwt::min_symbol + c)
-            : sym_t(random_in(pfp_rlbwt::min_symbol, (uint64_t { 1 } << (8 * sizeof(sym_t))) - 1)));
+            : sym_t(random_in(pfp_rlbwt::min_symbol, max_value_of<sym_t>())));
     }
 
     std::vector<sym_t> text;
@@ -600,11 +600,14 @@ TEST(test_pfp_rlbwt, fuzz)
         fuzz<uint8_t>("random 8 bit", false),
         fuzz<uint8_t>("repetitive 8 bit", true),
         fuzz<uint16_t>("repetitive 16 bit", true),
-        fuzz<pfp_rlbwt::sym24_t>("repetitive 24 bit", true),
+        fuzz<uint24_t>("repetitive 24 bit", true),
         fuzz<uint32_t>("repetitive 32 bit", true),
-        fuzz<pfp_rlbwt::sym40_t>("random 40 bit", false),
-        fuzz<pfp_rlbwt::sym48_t>("random 48 bit", false),
-        fuzz<pfp_rlbwt::sym48_t>("repetitive 48 bit", true),
+        fuzz<uint40_t>("random 40 bit", false),
+        fuzz<uint48_t>("random 48 bit", false),
+        fuzz<uint48_t>("repetitive 48 bit", true),
+        fuzz<uint56_t>("repetitive 56 bit", true),
+        fuzz<uint64_t>("random 64 bit", false),
+        fuzz<uint64_t>("repetitive 64 bit", true),
     }, fuzz_iterations(), &text_length);
 }
 
@@ -649,11 +652,11 @@ TEST(test_pfp_rlbwt, file_source)
     EXPECT_EQ(read, wide);
 
     // a file of 24-bit symbols, read reversed
-    std::vector<pfp_rlbwt::sym24_t> packed;
+    std::vector<uint24_t> packed;
     for (uint64_t i = 0; i < text.size(); i++) packed.emplace_back(uint64_t(uint8_t(text[i])) << (8 * (i % 3)));
-    std::ofstream(file, std::ios::binary).write((const char*) packed.data(), packed.size() * sizeof(pfp_rlbwt::sym24_t));
-    pfp_rlbwt::file_source<pfp_rlbwt::sym24_t> packed_src(file, true);
-    std::vector<pfp_rlbwt::sym24_t> packed_read(packed.size());
+    std::ofstream(file, std::ios::binary).write((const char*) packed.data(), packed.size() * sizeof(uint24_t));
+    pfp_rlbwt::file_source<uint24_t> packed_src(file, true);
+    std::vector<uint24_t> packed_read(packed.size());
     packed_src.new_reader()->read(0, packed.size(), packed_read.data());
     std::reverse(packed.begin(), packed.end());
     for (uint64_t i = 0; i < packed.size(); i++) ASSERT_EQ(uint64_t(packed_read[i]), uint64_t(packed[i])) << i;

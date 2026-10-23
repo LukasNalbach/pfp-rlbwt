@@ -31,7 +31,7 @@ add_subdirectory(external/pfp-rlbwt EXCLUDE_FROM_ALL)
 target_link_libraries(<target> PRIVATE pfp_rlbwt)
 ```
 
-A text T consists of symbols of 8, 16, 24, 32, 40 or 48 bits (`uint8_t`, `uint16_t`, `pfp_rlbwt::sym24_t`, `uint32_t`, `pfp_rlbwt::sym40_t`, `pfp_rlbwt::sym48_t`); every symbol has to be at least `pfp_rlbwt::min_symbol` (2). `pfp_rlbwt::build` reads it from a `text_source`: a `file_source<sym_t>` (a file with `sizeof(sym_t)` bytes per symbol, little endian, optionally reversed and, for one-byte symbols, with its bytes mapped), a `memory_source<sym_t>` (optionally reversed) or a class derived from `text_source<sym_t>`. It writes the BWT of T$, where $ is the symbol 0, to files with a given prefix; n = |T$| below.
+A text T consists of symbols of 1 to 8 bytes (`uint8_t`, `uint16_t`, `uint24_t`, `uint32_t`, `uint40_t`, `uint48_t`, `uint56_t`, `uint64_t`; the packed types are those of string-utils, `misc/packed_integers.hpp`); every symbol has to be at least `pfp_rlbwt::min_symbol` (2). `pfp_rlbwt::build` reads it from a `text_source`: a `file_source<sym_t>` (a file with `sizeof(sym_t)` bytes per symbol, little endian, optionally reversed and, for one-byte symbols, with its bytes mapped), a `memory_source<sym_t>` (optionally reversed) or a class derived from `text_source<sym_t>`. It writes the BWT of T$, where $ is the symbol 0, to files with a given prefix; n = |T$| below.
 
 | File | Content |
 | --- | --- |
@@ -341,7 +341,7 @@ The runs are split into B = ceil(r / `runs_per_block`) blocks (see above), which
 
 ```shell
 build/tests/test-pfp-rlbwt
-build/tests/test-pfp-rlbwt-wide    # the same tests with 40- and 64-bit
+build/tests/test-pfp-rlbwt-wide    # the same tests with 40- and 48-bit
                                  # indices for small inputs
 build/tests/test-pfp-rlbwt-comp    # the compressor
 ```

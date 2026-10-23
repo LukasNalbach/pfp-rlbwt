@@ -35,7 +35,8 @@
 #include <pfp_rlbwt/types.hpp>
 
 // the largest length and alphabet size of the inputs of libsais that are suffix-sorted with 32-bit and with 40-bit
-// indices (the tests lower them, so that they also cover the wider indices)
+// indices; larger inputs are suffix-sorted with 48-bit indices (the tests lower them, so that they also cover the
+// wider indices)
 #ifndef PFP_RLBWT_MAX_INDEX32
 #define PFP_RLBWT_MAX_INDEX32 INT32_MAX
 #endif
@@ -128,12 +129,7 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
     extern template class memory_source<sym_t>; \
     extern template result build<sym_t>(const text_source<sym_t>&, const std::string&, const params&);
 
-PFP_RLBWT_EXTERN(uint8_t)
-PFP_RLBWT_EXTERN(uint16_t)
-PFP_RLBWT_EXTERN(sym24_t)
-PFP_RLBWT_EXTERN(uint32_t)
-PFP_RLBWT_EXTERN(sym40_t)
-PFP_RLBWT_EXTERN(sym48_t)
+PFP_RLBWT_FOR_EACH_SYMBOL_TYPE(PFP_RLBWT_EXTERN)
 
 #undef PFP_RLBWT_EXTERN
 

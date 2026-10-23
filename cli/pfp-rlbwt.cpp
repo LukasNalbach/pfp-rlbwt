@@ -80,7 +80,7 @@ void print_help(std::ostream& out)
         "pfp-rlbwt [options] <input_file>");
     h.option("<input_file>", "a path", "the text");
     h.group("input");
-    h.option("-symbol-bytes <b>", "integer in [1, " + std::to_string(sizeof(sym48_t)) + "] (default: 1)",
+    h.option("-symbol-bytes <b>", "integer in [1, " + std::to_string(sizeof(uint64_t)) + "] (default: 1)",
         "the number of bytes per symbol of the input file (little endian); every symbol has to be at least "
         + min_symbol_str);
     h.option("-map", "", "map the bytes of the input file to " + min_symbol_str + ", " + std::to_string(min_symbol + 1)
@@ -134,7 +134,7 @@ void read_arguments(int argc, char** argv)
         } else if (s == "-p") {
             cli.p = args.integer(s, 1, omp_get_max_threads());
         } else if (s == "-symbol-bytes") {
-            cli.symbol_bytes = args.integer(s, 1, sizeof(pfp_rlbwt::sym48_t));
+            cli.symbol_bytes = args.integer(s, 1, sizeof(uint64_t));
         } else if (s == "-map") {
             cli.map_bytes = true;
         } else if (s == "-rev") {
@@ -284,13 +284,12 @@ void run()
 
     pfp_rlbwt::result result;
 
+    // only the bytes of a file with one-byte symbols are mapped
     switch (cli.symbol_bytes) {
-        case 1: result = build<uint8_t>(cli.map_bytes ? &map : nullptr); break;
-        case 2: result = build<uint16_t>(nullptr); break;
-        case 3: result = build<pfp_rlbwt::sym24_t>(nullptr); break;
-        case 4: result = build<uint32_t>(nullptr); break;
-        case 5: result = build<pfp_rlbwt::sym40_t>(nullptr); break;
-        default: result = build<pfp_rlbwt::sym48_t>(nullptr); break;
+        #define PFP_RLBWT_SYMBOL_CASE(sym_t) \
+            case sizeof(sym_t): result = build<sym_t>(sizeof(sym_t) == 1 && cli.map_bytes ? &map : nullptr); break;
+        PFP_RLBWT_FOR_EACH_SYMBOL_TYPE(PFP_RLBWT_SYMBOL_CASE)
+        #undef PFP_RLBWT_SYMBOL_CASE
     }
 
     const uint64_t time_ns = time_diff_ns(time_start, now());

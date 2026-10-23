@@ -25,30 +25,17 @@
  */
 
 // explicit instantiations of pfp_rlbwt::build and of the text sources for one symbol type; this file is compiled
-// once per symbol width (PFP_RLBWT_SYMBOL_BITS is 8, 16, 24, 32, 40 or 48, see CMakeLists.txt)
+// once per symbol width (PFP_RLBWT_SYMBOL_BYTES in [1, 8], see CMakeLists.txt)
 
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
 
-#if PFP_RLBWT_SYMBOL_BITS == 8
-#define PFP_RLBWT_SYMBOL uint8_t
-#elif PFP_RLBWT_SYMBOL_BITS == 16
-#define PFP_RLBWT_SYMBOL uint16_t
-#elif PFP_RLBWT_SYMBOL_BITS == 24
-#define PFP_RLBWT_SYMBOL sym24_t
-#elif PFP_RLBWT_SYMBOL_BITS == 32
-#define PFP_RLBWT_SYMBOL uint32_t
-#elif PFP_RLBWT_SYMBOL_BITS == 40
-#define PFP_RLBWT_SYMBOL sym40_t
-#elif PFP_RLBWT_SYMBOL_BITS == 48
-#define PFP_RLBWT_SYMBOL sym48_t
-#else
-#error "PFP_RLBWT_SYMBOL_BITS must be 8, 16, 24, 32, 40 or 48"
-#endif
-
 namespace pfp_rlbwt {
 
-template class file_source<PFP_RLBWT_SYMBOL>;
-template class memory_source<PFP_RLBWT_SYMBOL>;
-template result build<PFP_RLBWT_SYMBOL>(const text_source<PFP_RLBWT_SYMBOL>&, const std::string&, const params&);
+using instantiated_symbol_t = uint_of_width_t<PFP_RLBWT_SYMBOL_BYTES>;
+
+template class file_source<instantiated_symbol_t>;
+template class memory_source<instantiated_symbol_t>;
+template result build<instantiated_symbol_t>(const text_source<instantiated_symbol_t>&, const std::string&,
+    const params&);
 
 } // namespace pfp_rlbwt

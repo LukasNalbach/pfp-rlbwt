@@ -128,7 +128,7 @@ inline std::string merge_phase_name(const params& prm, bool writes_run_data)
 /**
  * @brief builds the output from the parsing
  * @tparam idx_t type of the values of the suffix arrays of the parsing and of the dictionary (int32_t, sa_int40_t
- *         or int64_t)
+ *         or sa_int48_t)
  * @param prs the parsing; its phrases are freed
  * @param prm parameters
  * @param prefix path prefix of the output files
@@ -140,7 +140,7 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
     std::chrono::steady_clock::time_point time;
     const uint16_t p = prm.num_threads;
 
-    log_phase_start(prm.log, time, "storing PFP (the ends of the phrase runs on disk)");
+    log_phase_start(prm.log, time, "spilling the phrase runs");
     phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p);
     log_phase_end(prm.log, time);
 
@@ -216,8 +216,7 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
 
     // a degenerate parse: parse again with the other seed and keep the parse with more phrases
     if (prs.num_phrases < n / (degenerate_parse_tolerance * prm.modulus)) {
-        log_phase_start(prm.log, time, "only " + format_number(prs.num_phrases) + " phrases, parsing again with other "
-            "trigger strings");
+        log_phase_start(prm.log, time, "only " + format_number(prs.num_phrases) + " phrases, reparsing");
         parsing<sym_t> retry = parse<sym_t>(text, prm, seed == 0 ? retry_trigger_seed : 0);
         log_phase_end(prm.log, time);
         if (retry.num_phrases > prs.num_phrases) prs = std::move(retry);
@@ -245,7 +244,8 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
 
     if (max_index <= PFP_RLBWT_MAX_INDEX32) res.r = build_from_parsing<sym_t, int32_t>(prs, prm, prefix);
     else if (max_index <= PFP_RLBWT_MAX_INDEX40) res.r = build_from_parsing<sym_t, sa_int40_t>(prs, prm, prefix);
-    else res.r = build_from_parsing<sym_t, int64_t>(prs, prm, prefix);
+    else if (max_index <= uint64_t(SA_INT48_MAX_N)) res.r = build_from_parsing<sym_t, sa_int48_t>(prs, prm, prefix);
+    else throw std::length_error("pfp_rlbwt: the parsing is too large for 48-bit suffix arrays");
 
     return res;
 }
