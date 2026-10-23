@@ -36,6 +36,7 @@
 #include <memory>
 #include <ostream>
 #include <vector>
+#include <misc/packed_integers.hpp>
 
 namespace pfp_rlbwt {
 
@@ -50,35 +51,13 @@ inline constexpr uint64_t terminator = 0;
 inline constexpr uint8_t max_packed_bits =
     std::numeric_limits<uint64_t>::digits - (std::numeric_limits<uint8_t>::digits - 1);
 
-/**
- * @brief an unsigned integer stored in its `bytes` least significant bytes (little endian); the type of the
- *        symbols of a text with 24-, 40- or 48-bit symbols
- */
-template <uint8_t bytes>
-struct packed_symbol {
-    static_assert(std::endian::native == std::endian::little,
-        "a packed_symbol stores the least significant bytes of a value, which assumes a little-endian layout");
-
-    uint8_t data[bytes];
-
-    packed_symbol() = default;
-    packed_symbol(uint64_t value) { std::memcpy(data, &value, bytes); }
-
-    operator uint64_t() const
-    {
-        uint64_t value = 0;
-        std::memcpy(&value, data, bytes);
-        return value;
-    }
-};
-
-using sym24_t = packed_symbol<3>;
-using sym40_t = packed_symbol<5>;
-using sym48_t = packed_symbol<6>;
+// calls X(sym_t) for each symbol type sym_t of a text: the unsigned integer types of 1 to 8 bytes (see uint_of_width_t)
+#define PFP_RLBWT_FOR_EACH_SYMBOL_TYPE(X) \
+    X(uint8_t) X(uint16_t) X(uint24_t) X(uint32_t) X(uint40_t) X(uint48_t) X(uint56_t) X(uint64_t)
 
 /**
  * @brief a text whose symbols are read in blocks by several threads at once (one reader per thread)
- * @tparam sym_t type of a symbol (uint8_t, uint16_t, sym24_t, uint32_t, sym40_t or sym48_t)
+ * @tparam sym_t type of a symbol (see PFP_RLBWT_FOR_EACH_SYMBOL_TYPE)
  */
 template <typename sym_t = uint8_t>
 class text_source {
@@ -105,9 +84,6 @@ public:
     // returns a new reader of the text
     virtual std::unique_ptr<reader> new_reader() const = 0;
 };
-
-// returns the fewest whole bytes (at least one) that hold the value x
-inline constexpr uint8_t byte_width(uint64_t x) { return uint8_t(std::max<uint64_t>(1, (std::bit_width(x) + 7) / 8)); }
 
 // the formats of the runs file (see ext_runs)
 enum class file_format : uint8_t {

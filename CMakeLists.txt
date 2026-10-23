@@ -35,24 +35,25 @@ option(PFP_RLBWT_BUILD_COMP "Build the compressor library pfp_rlbwt_comp" ${PROJ
 option(PFP_RLBWT_BUILD_COMP_CLI "Build pfp-rlbwt-comp" ${PROJECT_IS_TOP_LEVEL})
 
 # the libraries the instantiations are compiled and linked with
-set(pfp_rlbwt_dependencies libsais libsais40 ips4o ips2ra sux sdsl_core OpenMP::OpenMP_CXX)
+set(pfp_rlbwt_dependencies libsais libsais40 libsais48 ips4o ips2ra sux sdsl_core OpenMP::OpenMP_CXX)
 
-# adds the object libraries <prefix>_<bits> with the explicit instantiations (see the end of
-# include/pfp_rlbwt/pfp_rlbwt.hpp) for each symbol width and stores their objects in the variable objects; they are
-# compiled without the sources string-utils adds to its users (malloc_count), which belong to the programs
+# adds the object libraries <prefix>_<bytes> with the explicit instantiations (see the end of
+# include/pfp_rlbwt/pfp_rlbwt.hpp) for each symbol width in [1, 8] bytes and stores their objects in the variable
+# objects; they are compiled without the sources string-utils adds to its users (malloc_count), which belong to the
+# programs
 function(pfp_rlbwt_add_instantiations prefix objects)
   set(list "")
 
-  foreach(bits 8 16 24 32 40 48)
-    add_library(${prefix}_${bits} OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/instantiations.cpp")
-    target_compile_definitions(${prefix}_${bits} PRIVATE PFP_RLBWT_SYMBOL_BITS=${bits} ${ARGN}
+  foreach(bytes RANGE 1 8)
+    add_library(${prefix}_${bytes} OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/instantiations.cpp")
+    target_compile_definitions(${prefix}_${bytes} PRIVATE PFP_RLBWT_SYMBOL_BYTES=${bytes} ${ARGN}
       $<TARGET_PROPERTY:string_utils,INTERFACE_COMPILE_DEFINITIONS>
       $<TARGET_PROPERTY:malloc_count,INTERFACE_COMPILE_DEFINITIONS>)
-    target_include_directories(${prefix}_${bits} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+    target_include_directories(${prefix}_${bytes} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/"
       $<TARGET_PROPERTY:string_utils,INTERFACE_INCLUDE_DIRECTORIES>
       $<TARGET_PROPERTY:malloc_count,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_libraries(${prefix}_${bits} PRIVATE ${pfp_rlbwt_dependencies})
-    list(APPEND list $<TARGET_OBJECTS:${prefix}_${bits}>)
+    target_link_libraries(${prefix}_${bytes} PRIVATE ${pfp_rlbwt_dependencies})
+    list(APPEND list $<TARGET_OBJECTS:${prefix}_${bytes}>)
   endforeach()
 
   set(${objects} ${list} PARENT_SCOPE)
@@ -61,7 +62,7 @@ endfunction()
 pfp_rlbwt_add_instantiations(pfp_rlbwt pfp_rlbwt_objects)
 add_library(pfp_rlbwt STATIC ${pfp_rlbwt_objects})
 target_include_directories(pfp_rlbwt PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
-target_link_libraries(pfp_rlbwt PUBLIC libsais libsais40 ips4o ips2ra OpenMP::OpenMP_CXX INTERFACE string_utils)
+target_link_libraries(pfp_rlbwt PUBLIC libsais libsais40 libsais48 ips4o ips2ra OpenMP::OpenMP_CXX INTERFACE string_utils)
 
 if(PFP_RLBWT_BUILD_CLI)
   string_utils_add_executable(pfp-rlbwt cli/pfp-rlbwt.cpp "${CMAKE_BINARY_DIR}/cli/" pfp_rlbwt)
@@ -90,7 +91,7 @@ if(PFP_RLBWT_BUILD_TESTS)
   string_utils_add_executable(test-pfp-rlbwt tests/test-pfp-rlbwt.cpp "${CMAKE_BINARY_DIR}/tests/" pfp_rlbwt
     string_utils_test gtl)
 
-  # the same tests, with 40-bit indices for inputs of libsais of more than 2^10 values and 64-bit indices for
+  # the same tests, with 40-bit indices for inputs of libsais of more than 2^10 values and 48-bit indices for
   # more than 2^12 values
   set(pfp_rlbwt_wide_definitions PFP_RLBWT_MAX_INDEX32=1024 PFP_RLBWT_MAX_INDEX40=4096)
   pfp_rlbwt_add_instantiations(pfp_rlbwt_wide pfp_rlbwt_wide_objects ${pfp_rlbwt_wide_definitions})

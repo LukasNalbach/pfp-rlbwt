@@ -45,7 +45,6 @@
 
 #include <libsais.h>
 #include <libsais40.h>
-#include <libsais64.h>
 #include <omp.h>
 
 #include <pfp_rlbwt/construction/parse.hpp>
@@ -182,7 +181,7 @@ template <typename sym_t>
 inline uint64_t dictionary_alphabet_size(const dictionary<sym_t>& dict, uint64_t max_symbol)
 {
     if constexpr (sizeof(sym_t) == 1) return 256;
-    else return dict.num_words + std::min(max_symbol + 1, dict.size);
+    else return dict.num_words + (max_symbol < dict.size ? max_symbol + 1 : dict.size);
 }
 
 // entries of extra space (libsais: fs) per alphabet value that hold all bucket arrays of libsais
@@ -203,7 +202,7 @@ void build_integer_sa(idx_t* T, idx_t* SA, uint64_t n, uint64_t k, uint64_t fs, 
         ret = libsais_int_omp(T, SA, n, k, std::min<uint64_t>(fs, std::numeric_limits<int32_t>::max() - n), threads);
     else if constexpr (std::is_same_v<idx_t, sa_int40_t>)
         ret = libsais40_impl::libsais40_long_omp(T, SA, n, k, fs, threads);
-    else ret = libsais64_long_omp(T, SA, n, k, fs, threads);
+    else ret = libsais48_impl::libsais48_long_omp(T, SA, n, k, fs, threads);
     if (ret != 0) throw std::runtime_error("pfp_rlbwt: libsais failed on the parsing");
 }
 
@@ -216,7 +215,7 @@ void build_generalized_sa(const uint8_t* T, idx_t* SA, uint64_t n, uint16_t thre
         ret = libsais_gsa_omp(T, SA, n, byte_alphabet_free_space, nullptr, threads);
     else if constexpr (std::is_same_v<idx_t, sa_int40_t>)
         ret = libsais40_impl::libsais40_gsa_omp(T, SA, n, byte_alphabet_free_space, nullptr, threads);
-    else ret = libsais64_gsa_omp(T, SA, n, byte_alphabet_free_space, nullptr, threads);
+    else ret = libsais48_impl::libsais48_gsa_omp(T, SA, n, byte_alphabet_free_space, nullptr, threads);
     if (ret != 0) throw std::runtime_error("pfp_rlbwt: libsais failed on the dictionary");
 }
 
@@ -437,7 +436,7 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
 
     log_phase_end(prm.log, time);
 
-    log_phase_start(prm.log, time, "storing ISA of P to disk");
+    log_phase_start(prm.log, time, "spilling ISA of P");
     temporary_file isa_file = write_temporary_file(file, ISA.get(), (J + 1) * sizeof(idx_t));
     ISA.reset();
     log_spilled_size(prm.log, file);
@@ -446,7 +445,7 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
     /* ends_by_rank[ISA[v]] = F_{v-1} and symbols_by_rank[ISA[v]] = value v-2 of symbols_file (see phrase_arrays) for
        v in [0..J]; thread t of p threads reads ISA[v], F_{v-1} and value v-2 from their files for
        v in [t * (J+1) / p, (t+1) * (J+1) / p), with readers that together read direct_reader::block bytes at once */
-    log_phase_start(prm.log, time, "ordering the phrase runs by SA of P, reading ISA of P from disk");
+    log_phase_start(prm.log, time, "reading ISA of P, permuting the phrase runs");
     arr.ends_by_rank = uint_array(J + 1, arr.position_bytes);
     arr.symbols_by_rank = new_malloc_array<sym_t>(J + 1);
 
@@ -534,7 +533,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
 
     log_phase_end(prm.log, time);
 
-    log_phase_start(prm.log, time, "storing SA of D to disk");
+    log_phase_start(prm.log, time, "spilling SA of D");
     dsa.sa_file = write_temporary_file(file, SA.get(), size * sizeof(idx_t));
     log_spilled_size(prm.log, file);
     log_phase_end(prm.log, time);
@@ -545,7 +544,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
     auto first_pos = [&](uint64_t t, uint64_t p) { return std::min(size, 64 * first_bit_block(t, p)); };
 
     // Phi[SA[i]] = SA[i-1] for i in [1, size), in the place of SA
-    log_phase_start(prm.log, time, "building Phi of D from SA of D on disk");
+    log_phase_start(prm.log, time, "building Phi of D");
     idx_t* phi = SA.get();
 
     run_on_threads(threads, [&](uint64_t t, uint64_t p) {
@@ -596,7 +595,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
     log_phase_end(prm.log, time);
 
     // bit i of dsa.equals_previous_bits is bit SA[i] of equals_phi_bits
-    log_phase_start(prm.log, time, "reading SA of D from disk");
+    log_phase_start(prm.log, time, "reading SA of D");
     dsa.equals_previous_bits = new_malloc_array<uint64_t>(num_bit_blocks);
 
     run_on_threads(threads, [&](uint64_t t, uint64_t p) {
