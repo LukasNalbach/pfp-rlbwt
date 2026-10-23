@@ -140,16 +140,16 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
     std::chrono::steady_clock::time_point time;
     const uint16_t p = prm.num_threads;
 
-    log_phase_start(prm.log, time, "storing PFP");
-    phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, p);
+    log_phase_start(prm.log, time, "storing PFP (the ends of the phrase runs on disk)");
+    phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p);
     log_phase_end(prm.log, time);
 
-    log_phase_start(prm.log, time, "building SA of P");
-    parse_sa<idx_t> psa = build_parse_sa<idx_t, sym_t>(arr, prs.num_phrase_runs, prs.w, prs.dict, p);
-    log_phase_end(prm.log, time);
-
+    // the suffix array of the dictionary is built before the one of the parse and stays on disk
     dictionary_sa<idx_t> dsa = build_dictionary_sa<idx_t, sym_t>(prs.dict, prs.max_symbol, prs.w,
         prefix + ext_dictionary_sa, prm, time);
+
+    parse_sa<idx_t> psa = build_parse_sa<idx_t, sym_t>(arr, prs.num_phrase_runs, prs.w, prs.dict,
+        prefix + ext_parse_isa, prm, time);
 
     uint64_t r;
 

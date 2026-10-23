@@ -71,18 +71,13 @@ uint64_t bwt_merger<sym_t, idx_t>::lcp(const bwt_pos& a, const bwt_pos& b) const
 template <typename sym_t, typename idx_t>
 uint64_t bwt_merger<sym_t, idx_t>::lcp_in_runs(uint64_t l, run_walk a, run_walk b) const
 {
-    // continues v with the phrase run of rank v.next, whose word is s
+    // continues v with the phrase run of rank v.next >= 1, whose word is s
     auto load = [&](run_walk& v, uint64_t s) {
         v.word = s;
-
-        if (psa.repeated_set.contains(s)) {
-            const uint64_t i = psa.SA[v.next];
-            v.rem = arr.ends[i] - (i == 0 ? w - 1 : arr.ends[i - 1]);
-        } else {
-            v.rem = dict.length(s) - w;
-        }
-
-        v.next = psa.psi[v.next];
+        const uint64_t next = psa.psi[v.next];
+        if (psa.repeated_set.contains(s)) v.rem = arr.ends_by_rank[next] - arr.ends_by_rank[v.next];
+        else v.rem = dict.length(s) - w;
+        v.next = next;
     };
 
     while (true) {
@@ -111,12 +106,12 @@ uint64_t bwt_merger<sym_t, idx_t>::lcp_in_runs(uint64_t l, run_walk a, run_walk 
 }
 
 template <typename sym_t, typename idx_t>
-uint64_t bwt_merger<sym_t, idx_t>::count_bwt_positions(uint64_t beg, uint64_t end) const
+uint64_t bwt_merger<sym_t, idx_t>::count_bwt_positions(const idx_t* chunk_sa, uint64_t num) const
 {
     uint64_t cnt = 0;
 
-    for (uint64_t i = beg; i < end; i++) {
-        const uint64_t x = dsa.SA[i];
+    for (uint64_t i = 0; i < num; i++) {
+        const uint64_t x = chunk_sa[i];
         const uint64_t s = dsa.word_of(x);
         if (dict.word_start[s + 1] - 1 - x > w) cnt += dict.num_occ[s];
     }
@@ -236,8 +231,10 @@ void bwt_merger<sym_t, idx_t>::append_repeated_word(chunk_runs<sym_t>& out, uint
     const uint64_t occ = rw.occ;
     const uint64_t first_run = psa.C[s + 1];
     auto pos_of = [&](uint64_t q) { return position(x, len, s, &rw, q); };
-    // a phrase that is not the first one of its run is preceded by the symbol inner, the first one by its own symbol
-    const sym_t inner = bwt_symbol<sym_t>(arr.symbol_before_next[psa.SA[first_run]]);
+    /* a phrase that is not the first one of its run is preceded by the symbol inner, the first one by its own symbol;
+       inner precedes each phrase after a phrase of s, such as the first phrase of the run after the run of rank
+       first_run */
+    const sym_t inner = symbol_before_full_word(psa.psi[psa.psi[first_run]]);
     uint64_t run_beg = 0; // the positions run_beg, ... have the symbol sym
     sym_t sym = inner;
 
@@ -256,7 +253,7 @@ void bwt_merger<sym_t, idx_t>::append_repeated_word(chunk_runs<sym_t>& out, uint
     for (uint64_t h = 0; h < rw.num_runs; h++) {
         const uint64_t offset = rw.head_offset[h];
         if (offset > q) add(q, inner);
-        add(offset, symbol_before_run(psa.SA[first_run + h]));
+        add(offset, symbol_before_run_of_rank(first_run + h));
         q = offset + 1;
     }
 
@@ -276,16 +273,16 @@ void bwt_merger<sym_t, idx_t>::append_repeated_suffix(chunk_runs<sym_t>& out, ui
 }
 
 template <typename sym_t, typename idx_t>
-void bwt_merger<sym_t, idx_t>::append_repeated_group(chunk_runs<sym_t>& out, uint64_t i, uint64_t j, uint64_t len,
-    std::vector<repeated_range>& heap) const
+void bwt_merger<sym_t, idx_t>::append_repeated_group(chunk_runs<sym_t>& out, const idx_t* group, uint64_t num,
+    uint64_t len, std::vector<repeated_range>& heap) const
 {
     const sym_t* t = dict.text.get();
-    auto sym_of = [&](uint64_t member) { return bwt_symbol<sym_t>(t[dsa.SA[i + member] - 1]); };
+    auto sym_of = [&](uint64_t member) { return bwt_symbol<sym_t>(t[uint64_t(group[member]) - 1]); };
     // orders the ranges in heap by the rank of the suffix one phrase after their next one, the smallest first
     auto later = [](const repeated_range& a, const repeated_range& b) { return a.next_rank > b.next_rank; };
     // the dictionary suffix of a position is the one of its own word (see lcp)
     auto pos_of = [&](const repeated_range& r, uint64_t q) {
-        return position(dsa.SA[i + r.member], len, r.word, r.rw, q);
+        return position(group[r.member], len, r.word, r.rw, q);
     };
 
     // appends the positions of r with the offsets [r.cur..e-1]
@@ -296,15 +293,15 @@ void bwt_merger<sym_t, idx_t>::append_repeated_group(chunk_runs<sym_t>& out, uin
 
     heap.clear();
 
-    for (uint64_t q = i; q < j; q++) {
-        const uint64_t sq = dsa.word_of(dsa.SA[q]);
+    for (uint64_t q = 0; q < num; q++) {
+        const uint64_t sq = dsa.word_of(group[q]);
         const repeated_word_ranks* rwq = psa.find_repeated(sq);
-        heap.push_back({ 0, dict.num_occ[sq], psa.next_rank_in_P(sq, rwq, 0), sq, rwq, q - i });
+        heap.push_back({ 0, dict.num_occ[sq], psa.next_rank_in_P(sq, rwq, 0), sq, rwq, q });
     }
 
     const sym_t sym = sym_of(0);
     bool same_sym = true;
-    for (uint64_t q = i + 1; q < j && same_sym; q++) same_sym = sym_of(q - i) == sym;
+    for (uint64_t q = 1; q < num && same_sym; q++) same_sym = sym_of(q) == sym;
 
     if (same_sym && !prm.write_sa && plcp == nullptr) {
         // a single run, from the smallest first to the largest last rank
@@ -374,8 +371,8 @@ void bwt_merger<sym_t, idx_t>::append_repeated_group(chunk_runs<sym_t>& out, uin
 }
 
 template <typename sym_t, typename idx_t>
-void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_t start, chunk_runs<sym_t>& out,
-    merge_heaps<idx_t>& heaps) const
+void bwt_merger<sym_t, idx_t>::compute_chunk(const idx_t* chunk_sa, uint64_t beg, uint64_t end, uint64_t start,
+    chunk_runs<sym_t>& out, merge_heaps<idx_t>& heaps) const
 {
     std::vector<range_t>& heap = heaps.plain;
     out.clear(start);
@@ -383,10 +380,12 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_
     const index_array<idx_t>& psi = psa.psi;
     // orders the ranges in heap by their next rank, the smallest first
     auto later = [&](const range_t& a, const range_t& b) { return psi[a.cur] > psi[b.cur]; };
+    // returns SA[k] for k in [beg, end)
+    auto SA = [&](uint64_t k) { return uint64_t(chunk_sa[k - beg]); };
     uint64_t i = beg;
 
     while (i < end) {
-        const uint64_t x = dsa.SA[i];
+        const uint64_t x = SA(i);
         const uint64_t s = dsa.word_of(x);
         const uint64_t len = dict.word_start[s + 1] - 1 - x;
 
@@ -405,7 +404,7 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_
         if (has_repeated && psa.repeated_set.contains(s)) [[unlikely]] {
             if (j == i + 1 && x == dict.word_start[s]) append_repeated_word(out, x, len, s);
             else if (j == i + 1) append_repeated_suffix(out, x, len, s);
-            else append_repeated_group(out, i, j, len, heaps.repeated);
+            else append_repeated_group(out, chunk_sa + (i - beg), j - i, len, heaps.repeated);
             i = j;
             continue;
         }
@@ -428,11 +427,11 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_
             append_positions(out, bwt_symbol<sym_t>(t[x - 1]), occ, pos_of(list), pos_of(list + occ - 1), list);
         } else {
             // the words containing the suffix as a proper suffix; their ranges of ranks are merged
-            auto sym_of = [&](uint64_t member) { return bwt_symbol<sym_t>(t[dsa.SA[i + member] - 1]); };
+            auto sym_of = [&](uint64_t member) { return bwt_symbol<sym_t>(t[SA(i + member) - 1]); };
             bool repeated = false; // true <=> a word of the group is repeated
             // the ranks of the parse suffixes preceded by the word of SA[q] are psi[first..last-1]
             auto range_of = [&](uint64_t q) {
-                const uint64_t sq = dsa.word_of(dsa.SA[q]);
+                const uint64_t sq = dsa.word_of(SA(q));
                 if (has_repeated) repeated |= psa.repeated_set.contains(sq);
                 return std::make_pair(psa.C[sq + 1], psa.C[sq + 2]);
             };
@@ -452,7 +451,7 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_
                     cnt += e - b;
                 }
 
-                if (repeated) [[unlikely]] append_repeated_group(out, i, j, len, heaps.repeated);
+                if (repeated) [[unlikely]] append_repeated_group(out, chunk_sa + (i - beg), j - i, len, heaps.repeated);
                 else append_positions(out, sym, cnt, { x, len, first, 0 }, { x, len, last, 0 }, no_ranks);
             } else {
                 heap.clear();
@@ -463,7 +462,7 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(uint64_t beg, uint64_t end, uint64_
                 }
 
                 if (repeated) [[unlikely]] {
-                    append_repeated_group(out, i, j, len, heaps.repeated);
+                    append_repeated_group(out, chunk_sa + (i - beg), j - i, len, heaps.repeated);
                     i = j;
                     continue;
                 }
@@ -734,13 +733,34 @@ uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const
         bounds[c] = b;
     }
 
+    // a reader of the dictionary suffix array reads the largest chunk, but at most direct_reader::block bytes, at once
+    uint64_t max_chunk = 1;
+    for (uint64_t c = 0; c < num_chunks; c++) max_chunk = std::max(max_chunk, bounds[c + 1] - bounds[c]);
+    const uint64_t read_bytes = std::min<uint64_t>(max_chunk * sizeof(idx_t), direct_reader::block);
+
     // [0..num_chunks] chunk_starts[c] = BWT position of the first position of chunk c (only for the full arrays)
     std::vector<uint64_t> chunk_starts(num_chunks + 1, 0);
 
     if (prm.write_bwt || prm.write_sa || plcp != nullptr) {
-        #pragma omp parallel for num_threads(p) schedule(dynamic, 1)
-        for (uint64_t c = 0; c < num_chunks; c++) chunk_starts[c + 1] = m.count_bwt_positions(bounds[c], bounds[c + 1]);
+        std::vector<std::exception_ptr> failures(p);
 
+        #pragma omp parallel num_threads(p)
+        {
+            try {
+                array_file_reader sa_file(dsa.sa_file.path(), sizeof(idx_t), read_bytes);
+                no_init_vector<idx_t> chunk_sa;
+
+                #pragma omp for schedule(dynamic, 1)
+                for (uint64_t c = 0; c < num_chunks; c++) {
+                    dsa.read_sa(sa_file, bounds[c], bounds[c + 1], chunk_sa);
+                    chunk_starts[c + 1] = m.count_bwt_positions(chunk_sa.data(), chunk_sa.size());
+                }
+            } catch (...) {
+                failures[omp_get_thread_num()] = std::current_exception();
+            }
+        }
+
+        rethrow_first_exception(failures);
         for (uint64_t c = 0; c < num_chunks; c++) chunk_starts[c + 1] += chunk_starts[c];
     }
 
@@ -760,6 +780,8 @@ uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const
     #pragma omp parallel num_threads(p)
     {
         merge_heaps<idx_t> heaps;
+        std::unique_ptr<array_file_reader> sa_file;
+        no_init_vector<idx_t> chunk_sa; // the values of the dictionary suffix array of the chunk
 
         while (true) {
             const uint64_t c = next_chunk.fetch_add(1);
@@ -775,7 +797,12 @@ uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const
             chunk_runs<sym_t>& out = slots[c % num_slots];
 
             try {
-                m.compute_chunk(bounds[c], bounds[c + 1], chunk_starts[c], out, heaps);
+                if (sa_file == nullptr) {
+                    sa_file = std::make_unique<array_file_reader>(dsa.sa_file.path(), sizeof(idx_t), read_bytes);
+                }
+
+                dsa.read_sa(*sa_file, bounds[c], bounds[c + 1], chunk_sa);
+                m.compute_chunk(chunk_sa.data(), bounds[c], bounds[c + 1], chunk_starts[c], out, heaps);
             } catch (...) {
                 std::lock_guard<std::mutex> guard(lock);
                 error = std::current_exception();

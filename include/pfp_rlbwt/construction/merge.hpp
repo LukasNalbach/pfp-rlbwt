@@ -280,10 +280,10 @@ private:
     // appends the BWT positions of the proper suffix dict.text[x..x+len-1] of the repeated word s to out
     [[gnu::noinline]] void append_repeated_suffix(chunk_runs<sym_t>& out, uint64_t x, uint64_t len, uint64_t s) const;
 
-    /* appends the BWT positions of the group of equal dictionary suffixes SA[i..j-1] of length len, of which one or
-       more belong to a repeated word, to out */
-    [[gnu::noinline]] void append_repeated_group(chunk_runs<sym_t>& out, uint64_t i, uint64_t j, uint64_t len,
-        std::vector<repeated_range>& heap) const;
+    /* appends the BWT positions of the group of equal dictionary suffixes group[0..num-1] (a range of the dictionary
+       suffix array) of length len, of which one or more belong to a repeated word, to out */
+    [[gnu::noinline]] void append_repeated_group(chunk_runs<sym_t>& out, const idx_t* group, uint64_t num,
+        uint64_t len, std::vector<repeated_range>& heap) const;
 
     /* returns the LCP value of two BWT positions whose common prefix has length l up to the parse suffixes a and b
        (see run_walk) */
@@ -328,20 +328,17 @@ public:
        (see bwt_pos) */
     inline uint64_t sa(uint64_t len, uint64_t j, uint64_t back = 0) const
     {
-        const uint64_t x = arr.ends[psa.SA[j] - 1] + 1 - len - back; // position in S
+        const uint64_t x = arr.ends_by_rank[j] + 1 - len - back; // position in S
         return x == 0 ? n : x - 1;
     }
 
     inline uint64_t sa(const bwt_pos& b) const { return sa(b.dict_suffix_len, b.parse_rank, b.back); }
 
-    // returns the symbol before the first phrase of phrase run i
-    inline sym_t symbol_before_run(uint64_t i) const
-    {
-        return bwt_symbol<sym_t>(arr.symbol_before_next[i == 0 ? J - 1 : i - 1]);
-    }
-
     // returns the BWT symbol of the full-word position whose parse suffix has rank j
-    inline sym_t symbol_before_full_word(uint64_t j) const { return symbol_before_run(psa.SA[j] - 1); }
+    inline sym_t symbol_before_full_word(uint64_t j) const { return bwt_symbol<sym_t>(arr.symbols_by_rank[j]); }
+
+    // returns the BWT symbol before the phrase run starting the parse suffix of rank x >= 1
+    inline sym_t symbol_before_run_of_rank(uint64_t x) const { return symbol_before_full_word(psa.psi[x]); }
 
     // returns the length of the common prefix of the words s1 != s2 after their first w symbols
     inline uint64_t words_lcp(uint64_t s1, uint64_t s2) const
@@ -358,18 +355,19 @@ public:
 
     // ############################# CONSTRUCTION METHODS #############################
 
-    // returns the number of BWT positions of the dictionary suffixes SA[beg..end-1]
-    uint64_t count_bwt_positions(uint64_t beg, uint64_t end) const;
+    // returns the number of BWT positions of the dictionary suffixes chunk_sa[0..num-1] (a range of SA)
+    uint64_t count_bwt_positions(const idx_t* chunk_sa, uint64_t num) const;
 
     /**
      * @brief computes the BWT positions of the dictionary suffixes SA[beg..end-1]
+     * @param chunk_sa SA[beg..end-1]
      * @param beg first rank in the dictionary suffix array
      * @param end rank after the last one
      * @param start BWT position of the first of them
      * @param out the chunk (it is cleared first)
      * @param heaps memory for the heaps of the calling thread
      */
-    void compute_chunk(uint64_t beg, uint64_t end, uint64_t start, chunk_runs<sym_t>& out,
+    void compute_chunk(const idx_t* chunk_sa, uint64_t beg, uint64_t end, uint64_t start, chunk_runs<sym_t>& out,
         merge_heaps<idx_t>& heaps) const;
 };
 
@@ -444,7 +442,7 @@ public:
  * @param prs the parsing (n, w, J and the dictionary)
  * @param dsa the generalized suffix array of the dictionary
  * @param psa the suffix array of the parsing
- * @param arr the phrases (symbol_before_next and ends)
+ * @param arr the phrase runs (ends_by_rank and symbols_by_rank)
  * @param prm parameters
  * @param prefix path prefix of the output files
  * @param writes_run_data true <=> the runs file is written (see ext_runs)

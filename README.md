@@ -69,7 +69,7 @@ A reader keeps the block indexes and the code in RAM (about (2 log2 n) / `runs_p
 
 The coding of the LCP values follows GEF [2] (RLE_GEF; licensed under the Apache License 2.0), but pfp-rlbwt contains none of its code: GEF stores a sequence in partitions of 32000 values whose serialized layout (sdsl-lite vectors and rank directories without an index of the partition offsets) cannot be read with O(1) disk reads per value, so the coding is implemented anew in blocks of `runs_per_block` values that are read with one disk read (the rank within a block is computed with popcounts, so no rank directory is stored). The Apache License 2.0 allows such use from MIT-licensed code; including GEF's code would require keeping its license and notices for those files.
 
-While it runs, `build` stores the suffix array of the dictionary temporarily in `<prefix>.dsa`; with the compressed format, it writes the records of the plain format to `<prefix>.bwt-runs.records` and the LCP blocks to `<prefix>.bwt-runs.<identifier>` and computes the compressed format from them with `num_threads` threads.
+While it runs, `build` stores the suffix array of the dictionary temporarily in `<prefix>.dsa`, the ends of the phrase runs and the symbols before their next phrases in `<prefix>.run-ends` and `<prefix>.run-symbols`, and the inverse suffix array of the parse in `<prefix>.isa`, so that they are not held in RAM while they are not needed; with the compressed format, it writes the records of the plain format to `<prefix>.bwt-runs.records` and the LCP blocks to `<prefix>.bwt-runs.<identifier>` and computes the compressed format from them with `num_threads` threads.
 
 ### Readers (`#include <pfp_rlbwt/output/readers.hpp>`)
 

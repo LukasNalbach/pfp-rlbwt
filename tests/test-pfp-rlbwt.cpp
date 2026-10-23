@@ -253,7 +253,10 @@ void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& param
     EXPECT_EQ(file.sections().size(), ids.size() + params.extra_sections.size());
     EXPECT_FALSE(std::filesystem::exists(runs + pfp_rlbwt::ext_temporary_records));
     EXPECT_FALSE(std::filesystem::exists(runs + "." + std::to_string(pfp_rlbwt::section_lcp_blocks)));
-    EXPECT_FALSE(std::filesystem::exists(prefix + pfp_rlbwt::ext_dictionary_sa));
+    for (const char* ext : { pfp_rlbwt::ext_dictionary_sa, pfp_rlbwt::ext_phrase_run_ends,
+             pfp_rlbwt::ext_phrase_run_symbols, pfp_rlbwt::ext_parse_isa }) {
+        EXPECT_FALSE(std::filesystem::exists(prefix + ext)) << ext;
+    }
 
     // the sections are stored one after another, followed by the table of contents
     uint64_t end = 0;
