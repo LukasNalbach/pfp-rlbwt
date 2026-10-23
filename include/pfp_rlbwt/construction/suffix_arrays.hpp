@@ -436,7 +436,7 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
 
     log_phase_end(prm.log, time);
 
-    log_phase_start(prm.log, time, "spilling ISA of P");
+    log_phase_start(prm.log, time, "storing ISA of P");
     temporary_file isa_file = write_temporary_file(file, ISA.get(), (J + 1) * sizeof(idx_t));
     ISA.reset();
     log_spilled_size(prm.log, file);
@@ -445,7 +445,7 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
     /* ends_by_rank[ISA[v]] = F_{v-1} and symbols_by_rank[ISA[v]] = value v-2 of symbols_file (see phrase_arrays) for
        v in [0..J]; thread t of p threads reads ISA[v], F_{v-1} and value v-2 from their files for
        v in [t * (J+1) / p, (t+1) * (J+1) / p), with readers that together read direct_reader::block bytes at once */
-    log_phase_start(prm.log, time, "reading ISA of P, permuting the phrase runs");
+    log_phase_start(prm.log, time, "ordering the phrase runs by SA of P");
     arr.ends_by_rank = uint_array(J + 1, arr.position_bytes);
     arr.symbols_by_rank = new_malloc_array<sym_t>(J + 1);
 
@@ -466,7 +466,6 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
         }
     });
 
-    log_spilled_size(prm.log, file);
     isa_file.remove();
     arr.ends_file.remove();
     arr.symbols_file.remove();
@@ -533,7 +532,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
 
     log_phase_end(prm.log, time);
 
-    log_phase_start(prm.log, time, "spilling SA of D");
+    log_phase_start(prm.log, time, "storing SA of D");
     dsa.sa_file = write_temporary_file(file, SA.get(), size * sizeof(idx_t));
     log_spilled_size(prm.log, file);
     log_phase_end(prm.log, time);
@@ -611,7 +610,6 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
         }
     });
 
-    log_spilled_size(prm.log, file);
     log_phase_end(prm.log, time);
     equals_phi_bits.reset();
 

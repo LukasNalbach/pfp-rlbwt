@@ -263,12 +263,12 @@ void run()
         if (ext == pfp_rlbwt::ext_runs) output_names += samples;
     }
 
-    std::cout << "building the BWT of " << (cli.reverse ? "the reversed " : "") << cli.path_input_file << " ("
-              << format_size(bytes) << ") with the prefix-free parsing using " << format_threads(p)
-              << ", window length w = " << params.window << ", modulus " << params.modulus
+    std::cout << "building the RLBWT of " << (cli.reverse ? "the reversed " : "") << cli.path_input_file << " ("
+              << format_size(bytes) << ") with " << format_threads(p) << ", w = " << params.window << ", p = "
+              << params.modulus
               << (cli.symbol_bytes == 1 ? std::string() : ", " + std::to_string(cli.symbol_bytes) + " bytes per symbol")
               << std::endl;
-    std::cout << "output: " << output_names << std::endl << std::endl;
+    std::cout << "output: " << output_names << std::endl;
 
     const auto time_start = now();
     const uint64_t baseline_mem_usage = malloc_count_current();
@@ -296,26 +296,15 @@ void run()
     // peak memory usage over all phases (see log_phase_start)
     const uint64_t peak = overall_peak() - baseline_mem_usage;
     uint64_t output_size = 0; // the total size of the output files in bytes
-    std::vector<std::pair<std::string, uint64_t>> output_sizes; // the written output files with their sizes in bytes
 
     for (const auto& [written, ext] : outputs) {
         if (!written) continue;
-        const uint64_t size = std::filesystem::file_size(cli.prefix + ext, ec);
+        output_size += std::filesystem::file_size(cli.prefix + ext, ec);
         if (ec) throw std::runtime_error("cannot read " + cli.prefix + ext);
-        output_sizes.emplace_back(cli.prefix + ext, size);
-        output_size += size;
     }
 
-    std::cout << std::endl << "n = " << format_number(result.n_with_terminator) << " (with the terminator), r = "
-              << format_number(result.r) << ", n/r = "
-              << format_ratio(double(result.n_with_terminator) / double(result.r)) << std::endl << std::endl;
-
-    if (begin_listing(output_size)) {
-        for (const auto& [path, size] : output_sizes) log_component(path, size);
-        end_listing();
-    }
-
-    std::cout << std::endl;
+    std::cout << "n = " << format_number(result.n_with_terminator) << ", r = " << format_number(result.r) << ", n/r = "
+              << format_ratio(double(result.n_with_terminator) / double(result.r)) << std::endl;
     log_construction_summary(time_ns, bytes, peak);
     log_output_size("output", output_size, bytes);
 
