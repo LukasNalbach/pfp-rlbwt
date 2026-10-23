@@ -33,12 +33,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -255,19 +257,40 @@ public:
     template <typename fnc_t>
     void move_to(fnc_t fnc, uint16_t threads)
     {
+        move_blocks([&](uint64_t offset, const val_t* values, uint64_t num) {
+            for (uint64_t i = 0; i < num; i++) fnc(offset + i, values[i]);
+        }, threads);
+    }
+
+    /**
+     * @brief calls fnc(offset, values, num) for each block, where values[0..num-1] are the values offset, ...,
+     *        offset + num - 1, and frees the blocks; the blocks are processed in parallel and in any order
+     * @param fnc function called for each block
+     * @param threads number of threads
+     */
+    template <typename fnc_t>
+    void move_blocks(fnc_t fnc, uint16_t threads)
+    {
         // offsets[b] = number of values in the blocks before block b
         std::vector<uint64_t> offsets(blocks.size() + 1, 0);
         for (uint64_t b = 0; b < blocks.size(); b++) offsets[b + 1] = offsets[b] + sizes[b];
+        std::vector<std::exception_ptr> failures(blocks.size());
 
         #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
         for (uint64_t b = 0; b < blocks.size(); b++) {
-            for (uint64_t i = 0; i < sizes[b]; i++) fnc(offsets[b] + i, blocks[b][i]);
+            try {
+                fnc(offsets[b], blocks[b].get(), sizes[b]);
+            } catch (...) {
+                failures[b] = std::current_exception();
+            }
+
             blocks[b].reset();
         }
 
         blocks.clear();
         sizes.clear();
         fill = capacity = 0;
+        rethrow_first_exception(failures);
     }
 };
 
@@ -405,6 +428,159 @@ public:
         if (!platform::set_size(fd, length)) throw std::runtime_error("pfp_rlbwt: cannot write " + path);
         platform::close(fd);
         fd = -1;
+    }
+};
+
+// the path of a temporary file, which is removed when the object is destroyed
+class temporary_file {
+private:
+    std::string file_path; // the path (empty: no file)
+
+public:
+    temporary_file() = default;
+    explicit temporary_file(std::string path) : file_path(std::move(path)) { }
+    ~temporary_file() { remove(); }
+
+    temporary_file(const temporary_file&) = delete;
+    temporary_file& operator=(const temporary_file&) = delete;
+    temporary_file(temporary_file&& other) noexcept : file_path(std::exchange(other.file_path, std::string())) { }
+
+    temporary_file& operator=(temporary_file&& other) noexcept
+    {
+        if (this != &other) {
+            remove();
+            file_path = std::exchange(other.file_path, std::string());
+        }
+
+        return *this;
+    }
+
+    const std::string& path() const { return file_path; }
+
+    // removes the file
+    void remove()
+    {
+        if (file_path.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove(file_path, ec);
+        file_path.clear();
+    }
+};
+
+/**
+ * @brief writes bytes to a new file (see direct_ofstream)
+ * @param path path of the file
+ * @param data the bytes
+ * @param size number of bytes
+ * @return the file
+ */
+inline temporary_file write_temporary_file(const std::string& path, const void* data, uint64_t size)
+{
+    temporary_file file(path);
+    direct_ofstream out(path);
+    if (!out.is_open()) throw std::runtime_error("pfp_rlbwt: cannot write " + path);
+    write_in_chunks(out, (const char*) data, size);
+    out.close();
+    if (out.fail()) throw std::runtime_error("pfp_rlbwt: cannot write " + path);
+    return file;
+}
+
+/**
+ * @brief reads the values of an array stored in a file (a fixed number of bytes per value, little endian), with
+ *        O_DIRECT (if the file system does not support it, through the page cache, whose read pages are dropped); a
+ *        value that is not in the buffer is read together with the values after it, read_bytes bytes at once
+ */
+class array_file_reader {
+private:
+    static constexpr uint64_t sector = direct_io_alignment;
+
+    uint64_t width; // bytes per value
+    uint64_t mask; // the low 8 * width bits
+    uint64_t read_bytes; // number of bytes read at once
+    uint64_t num_values = 0; // number of values in the file
+    uint8_t* buffer = nullptr; // read_bytes + 2 * sector bytes (rounded up to a multiple of sector), aligned to sector
+    int fd = -1; // file descriptor
+    bool direct = false; // true <=> the file is opened with O_DIRECT
+    uint64_t beg = 0, end = 0; // the values [beg, end) are in the buffer
+    const uint8_t* data = nullptr; // the bytes of value beg in the buffer
+
+    // reads the values [i, i + read_bytes / width) into the buffer
+    void read_from(uint64_t i)
+    {
+        beg = i;
+        end = std::min(num_values, i + std::max<uint64_t>(1, read_bytes / width));
+        const uint64_t first = beg * width, last = end * width; // the bytes [first, last) are needed
+        const uint64_t read_beg = direct ? (first / sector) * sector : first;
+        const uint64_t read_end = direct ? div_ceil(last, sector) * sector : last;
+        const uint64_t num_read = pread_fully(fd, buffer, read_end - read_beg, read_beg);
+        if (read_beg + num_read < last) throw std::runtime_error("pfp_rlbwt: cannot read a temporary file");
+        if (!direct) platform::drop_cached(fd, read_beg, num_read);
+        data = buffer + (first - read_beg);
+    }
+
+public:
+    /**
+     * @brief opens a file of values
+     * @param path path of the file
+     * @param width bytes per value
+     * @param read_bytes number of bytes read at once (at least width)
+     */
+    array_file_reader(const std::string& path, uint64_t width, uint64_t read_bytes = direct_reader::block)
+        : width(width), mask(width >= sizeof(uint64_t) ? ~uint64_t { 0 } : (uint64_t { 1 } << (8 * width)) - 1),
+          read_bytes(read_bytes)
+    {
+        std::error_code ec;
+        num_values = std::filesystem::file_size(path, ec) / width;
+        if (ec) throw std::runtime_error("pfp_rlbwt: cannot read " + path);
+        buffer = (uint8_t*) platform::allocate_aligned_counted(div_ceil(read_bytes, sector) * sector + 2 * sector,
+            sector);
+        if (buffer == nullptr) throw std::bad_alloc();
+        fd = open_direct_or_buffered(path, platform::file_access::read, direct);
+
+        if (fd < 0) {
+            platform::free_aligned(buffer);
+            throw std::runtime_error("pfp_rlbwt: cannot read " + path);
+        }
+
+        if (!direct) advise_uncached(fd);
+    }
+
+    ~array_file_reader()
+    {
+        platform::free_aligned(buffer);
+        platform::close(fd);
+    }
+
+    array_file_reader(const array_file_reader&) = delete;
+    array_file_reader& operator=(const array_file_reader&) = delete;
+
+    // returns the bytes of value i
+    inline const uint8_t* bytes(uint64_t i)
+    {
+        if (i < beg || i >= end) [[unlikely]] read_from(i);
+        return data + (i - beg) * width;
+    }
+
+    // returns value i (width <= 8; loads 8 bytes, which the buffer holds after each value, and masks them)
+    inline uint64_t operator[](uint64_t i)
+    {
+        uint64_t val;
+        std::memcpy(&val, bytes(i), sizeof(uint64_t));
+        return val & mask;
+    }
+
+    // copies the values [from, to) to dst
+    void read(uint64_t from, uint64_t to, void* dst)
+    {
+        uint8_t* out = (uint8_t*) dst;
+
+        for (uint64_t i = from; i < to;) {
+            const uint8_t* src = bytes(i);
+            const uint64_t num = std::min(to, end) - i;
+            std::memcpy(out, src, num * width);
+            out += num * width;
+            i += num;
+        }
     }
 };
 

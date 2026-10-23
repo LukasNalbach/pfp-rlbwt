@@ -215,8 +215,13 @@ inline constexpr const char* ext_runs = ".bwt-runs";
 inline constexpr const char* ext_bwt = ".bwt"; // BWT[0..n-1] (sizeof(sym_t) bytes per symbol)
 inline constexpr const char* ext_sa = ".sa"; // SA[0..n-1] (byte_width(n) bytes per value)
 inline constexpr const char* ext_lcp = ".lcp"; // LCP[0..n-1] (byte_width(n) bytes per value)
-// temporary: the suffix array of the dictionary while Phi is computed in its place (see build_dictionary_sa)
+// temporary: the suffix array of the dictionary (see dictionary_sa)
 inline constexpr const char* ext_dictionary_sa = ".dsa";
+// temporary: the ends of the phrase runs and the symbols before the phrases after them (see phrase_arrays)
+inline constexpr const char* ext_phrase_run_ends = ".run-ends";
+inline constexpr const char* ext_phrase_run_symbols = ".run-symbols";
+// temporary: the inverse suffix array of the parse of the phrase runs (see build_parse_sa)
+inline constexpr const char* ext_parse_isa = ".isa";
 // temporary: the records of the plain format, from which the compressed format is computed
 inline constexpr const char* ext_temporary_records = ".records";
 

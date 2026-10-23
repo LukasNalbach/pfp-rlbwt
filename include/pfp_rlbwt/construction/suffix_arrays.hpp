@@ -54,15 +54,13 @@
 
 namespace pfp_rlbwt {
 
-/* the suffix array SA of the parse of the phrase runs, Psi, and the starts C of the ranges of ranks of the suffixes
-   per first word; for the words with a phrase run of two or more phrases, also the order of the suffixes of P (the
-   parse of the phrases) that start with them. The suffixes of P that start at the first phrase (the head) of a phrase
-   run are ordered as the suffixes of the parse of the phrase runs (see phrase_runs.hpp). */
+/* Psi of the suffix array SA of the parse of the phrase runs (SA[x] = the phrase run starting the suffix of rank x,
+   SA[0] = J), and the starts C of the ranges of ranks of the suffixes per first word; for the words with a phrase run
+   of two or more phrases, also the order of the suffixes of P (the parse of the phrases) that start with them. The
+   suffixes of P that start at the first phrase (the head) of a phrase run are ordered as the suffixes of the parse of
+   the phrase runs (see phrase_runs.hpp). */
 template <typename idx_t>
 struct parse_sa {
-    /* the suffix array of the parse of the phrase runs: [0..J] SA[x] = the phrase run starting the suffix of rank x;
-       SA[0] = J */
-    index_array<idx_t> SA;
     // Psi: [0..J] psi[x] = ISA[SA[x]+1], the rank of the suffix one phrase run later (psi[0] = ISA[0])
     index_array<idx_t> psi;
     /* [0..D+1] C[c] = number of suffixes of the parse of the phrase runs that start with a value < c (value 0 is the
@@ -137,13 +135,14 @@ struct parse_sa {
 };
 
 /**
- * @brief the generalized suffix array of the dictionary, the positions where a suffix equals its predecessor and
- *        the word containing each position
+ * @brief the generalized suffix array of the dictionary in a file, the positions where a suffix equals its
+ *        predecessor and the word containing each position
  */
 template <typename idx_t>
 struct dictionary_sa {
-    // the generalized suffix array of dict.text: [0..size-1] SA[i] = starting position of the i-th smallest suffix
-    index_array<idx_t> SA;
+    /* the file of the generalized suffix array of dict.text: [0..size-1] SA[i] = starting position of the i-th
+       smallest suffix (sizeof(idx_t) bytes per value) */
+    temporary_file sa_file;
     /* bits [0..size-1] in size/64+1 words, bit i is bit i % 64 of equals_previous_bits[i / 64]: bit i (i >= 1) = 1
        <=> dict.text[SA[i]..] and dict.text[SA[i-1]..] are equal up to their separators and longer than w; bit 0 = 0 */
     malloc_array_t<uint64_t> equals_previous_bits;
@@ -159,6 +158,19 @@ struct dictionary_sa {
     inline uint64_t word_of(uint64_t x) const
     {
         return word_starts_before[x / 64] + std::popcount(word_starts[x / 64] & (~uint64_t { 0 } >> (63 - x % 64))) - 1;
+    }
+
+    /**
+     * @brief reads SA[beg..end-1] from sa_file
+     * @param file a reader of sa_file (with sizeof(idx_t) bytes per value)
+     * @param beg first rank
+     * @param end rank after the last one
+     * @param values receives SA[beg..end-1]
+     */
+    static void read_sa(array_file_reader& file, uint64_t beg, uint64_t end, no_init_vector<idx_t>& values)
+    {
+        resize_no_init(values, end - beg);
+        file.read(beg, end, values.data());
     }
 };
 
@@ -209,30 +221,6 @@ void build_generalized_sa(const uint8_t* T, idx_t* SA, uint64_t n, uint16_t thre
 }
 
 /**
- * @brief calls fnc(i, A[i]) for each i in [beg, end), for an array A of idx_t values stored in a file
- * @param file reader of the file
- * @param beg first index
- * @param end index after the last one
- * @param fnc the function
- */
-template <typename idx_t, typename fnc_t>
-void for_each_value_in_file(direct_reader& file, uint64_t beg, uint64_t end, fnc_t fnc)
-{
-    constexpr uint64_t values_per_read = direct_reader::block / sizeof(idx_t);
-
-    for (uint64_t b = beg; b < end; b += values_per_read) {
-        const uint64_t e = std::min(end, b + values_per_read);
-        const uint8_t* data = file.read(b * sizeof(idx_t), e * sizeof(idx_t));
-
-        for (uint64_t i = b; i < e; i++) {
-            idx_t value;
-            std::memcpy(&value, data + (i - b) * sizeof(idx_t), sizeof(idx_t));
-            fnc(i, uint64_t(value));
-        }
-    }
-}
-
-/**
  * @brief computes the order of the suffixes of P that start with a repeated word (see repeated_word_ranks)
  * @param psa the suffix array of the parse of the phrase runs, Psi and C
  * @param arr the phrase runs
@@ -270,10 +258,9 @@ void build_repeated_word_ranks(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>
         rw.first_rank = first + psa.extra_before[y];
         rw.num_runs = last - first;
 
-        // the number of phrases of the run starting the suffix of rank x
+        // the number of phrases of the run starting the suffix of rank x >= 1
         auto copies = [&](uint64_t x) {
-            const uint64_t i = psa.SA[x];
-            return (arr.ends[i] - (i == 0 ? w - 1 : arr.ends[i - 1])) / rw.advance;
+            return (arr.ends_by_rank[psa.psi[x]] - arr.ends_by_rank[x]) / rw.advance;
         };
 
         // the runs followed by a smaller suffix (the down runs) come first: [first..mid-1]
@@ -369,21 +356,28 @@ void build_repeated_word_ranks(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>
 }
 
 /**
- * @brief computes the suffix array of the parse of the phrase runs and Psi, and frees the parse; for the repeated
- *        words also the order of the suffixes of P that start with them
+ * @brief computes Psi of the suffix array of the parse of the phrase runs and frees the parse; orders the ends and the
+ *        symbols of the phrase runs by rank (see phrase_arrays::ends_by_rank and phrase_arrays::symbols_by_rank),
+ *        reading them and the inverse suffix array, which is stored in a file meanwhile, from disk, and removes their
+ *        files; for the repeated words also computes the order of the suffixes of P that start with them
  * @param arr the phrase runs
  * @param J number of phrase runs
  * @param w length of a trigger string
  * @param dict the dictionary
- * @param threads number of threads
+ * @param file path of the file that stores the inverse suffix array temporarily
+ * @param prm parameters (threads and logging)
+ * @param time phase timer (see log_phase_start)
  */
 template <typename idx_t, typename sym_t>
 parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uint64_t w,
-    const dictionary<sym_t>& dict, uint16_t threads)
+    const dictionary<sym_t>& dict, const std::string& file, const params& prm,
+    std::chrono::steady_clock::time_point& time)
 {
+    const uint16_t threads = prm.num_threads;
     const uint64_t D = dict.num_words;
     parse_sa<idx_t> psa;
     psa.num_words = D;
+    log_phase_start(prm.log, time, "building SA of P");
     const uint64_t free_space = free_space_per_value * (arr.num_letters + 1);
     malloc_array_t<idx_t> SA = new_malloc_array<idx_t>(J + 1 + free_space);
     build_integer_sa(arr.P.get(), SA.get(), J + 1, arr.num_letters + 1, free_space, threads);
@@ -413,20 +407,17 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
         }
     }
 
-    // Psi from the inverse suffix array ISA, which is stored in the memory of P (P is not needed any more)
+    /* the inverse suffix array ISA, which is stored in the memory of P (P is not needed any more), and Psi from it,
+       which is stored in the memory of SA */
     malloc_array_t<idx_t> ISA = std::move(arr.P);
 
     #pragma omp parallel for num_threads(threads)
     for (uint64_t x = 0; x <= J; x++) ISA[uint64_t(SA[x])] = idx_t(x);
 
-    malloc_array_t<idx_t> psi = new_malloc_array<idx_t>(J + 1);
-
     #pragma omp parallel for num_threads(threads)
-    for (uint64_t x = 0; x <= J; x++) psi[x] = ISA[uint64_t(SA[x]) == J ? 0 : uint64_t(SA[x]) + 1];
+    for (uint64_t x = 0; x <= J; x++) SA[x] = ISA[uint64_t(SA[x]) == J ? 0 : uint64_t(SA[x]) + 1];
 
-    ISA.reset();
-    psa.SA = index_array<idx_t>(std::move(SA), J + 1, J);
-    psa.psi = index_array<idx_t>(std::move(psi), J + 1, J);
+    psa.psi = index_array<idx_t>(std::move(SA), J + 1, J);
     psa.rank_shift = J + 1 > D ? std::bit_width((J + 1) / D) - 1 : 0;
     psa.block_word.resize((J >> psa.rank_shift) + 2);
 
@@ -444,18 +435,55 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
         psa.block_word[t] = uint32_t(lo - 1);
     }
 
+    log_phase_end(prm.log, time);
+
+    log_phase_start(prm.log, time, "storing ISA of P to disk");
+    temporary_file isa_file = write_temporary_file(file, ISA.get(), (J + 1) * sizeof(idx_t));
+    ISA.reset();
+    log_spilled_size(prm.log, file);
+    log_phase_end(prm.log, time);
+
+    /* ends_by_rank[ISA[v]] = F_{v-1} and symbols_by_rank[ISA[v]] = value v-2 of symbols_file (see phrase_arrays) for
+       v in [0..J]; thread t of p threads reads ISA[v], F_{v-1} and value v-2 from their files for
+       v in [t * (J+1) / p, (t+1) * (J+1) / p), with readers that together read direct_reader::block bytes at once */
+    log_phase_start(prm.log, time, "ordering the phrase runs by SA of P, reading ISA of P from disk");
+    arr.ends_by_rank = uint_array(J + 1, arr.position_bytes);
+    arr.symbols_by_rank = new_malloc_array<sym_t>(J + 1);
+
+    run_on_threads(threads, [&](uint64_t t, uint64_t p) {
+        const uint64_t beg = (t * (J + 1)) / p, end = ((t + 1) * (J + 1)) / p;
+        if (beg >= end) return;
+        constexpr uint64_t num_files = 3;
+        constexpr uint64_t read_bytes = direct_reader::block / num_files;
+        array_file_reader isa(isa_file.path(), sizeof(idx_t), read_bytes);
+        array_file_reader ends(arr.ends_file.path(), arr.position_bytes, read_bytes);
+        array_file_reader symbols(arr.symbols_file.path(), sizeof(sym_t), read_bytes);
+
+        for (uint64_t v = beg; v < end; v++) {
+            const uint64_t x = isa[v];
+            arr.ends_by_rank.set(x, v == 0 ? w - 1 : ends[v - 1]);
+            if (v <= 1) arr.symbols_by_rank[x] = arr.last_symbol;
+            else std::memcpy(&arr.symbols_by_rank[x], symbols.bytes(v - 2), sizeof(sym_t));
+        }
+    });
+
+    log_spilled_size(prm.log, file);
+    isa_file.remove();
+    arr.ends_file.remove();
+    arr.symbols_file.remove();
     if (!arr.repeated_words.empty()) build_repeated_word_ranks(psa, arr, J, w, dict, threads);
+    log_phase_end(prm.log, time);
     return psa;
 }
 
 /**
- * @brief computes the generalized suffix array of the dictionary and the positions where a suffix of length > w
- *        equals its predecessor; the suffix array is stored in a file while Phi is computed in its place, and the
+ * @brief computes the generalized suffix array of the dictionary, which is stored in a file, and the positions where
+ *        a suffix of length > w equals its predecessor; Phi is computed in the place of the suffix array, and the
  *        equal suffixes are found with Phi as in the computation of the PLCP array
  * @param dict the dictionary
  * @param max_symbol the largest symbol of the dictionary
  * @param w length of a trigger string
- * @param file path of the file that stores the suffix array temporarily
+ * @param file path of the file that stores the suffix array (see dictionary_sa::sa_file)
  * @param prm parameters (threads and logging)
  * @param time phase timer (see log_phase_start)
  */
@@ -506,22 +534,8 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
 
     log_phase_end(prm.log, time);
 
-    // removes the file when the function returns or throws
-    struct file_remover {
-        const std::string& path;
-        ~file_remover() { std::error_code ec; std::filesystem::remove(path, ec); }
-    } remover { file };
-
     log_phase_start(prm.log, time, "storing SA of D to disk");
-
-    {
-        direct_ofstream out(file);
-        if (!out.is_open()) throw std::runtime_error("pfp_rlbwt: cannot write " + file);
-        write_in_chunks(out, (const char*) SA.get(), size * sizeof(idx_t));
-        out.close();
-        if (out.fail()) throw std::runtime_error("pfp_rlbwt: cannot write " + file);
-    }
-
+    dsa.sa_file = write_temporary_file(file, SA.get(), size * sizeof(idx_t));
     log_spilled_size(prm.log, file);
     log_phase_end(prm.log, time);
 
@@ -538,13 +552,14 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
         const uint64_t beg = std::max<uint64_t>(1, first_pos(t, p));
         const uint64_t end = first_pos(t + 1, p);
         if (beg >= end) return;
-        direct_reader in(file);
-        uint64_t prev = 0;
+        array_file_reader in(file, sizeof(idx_t));
+        uint64_t prev = in[beg - 1];
 
-        for_each_value_in_file<idx_t>(in, beg - 1, end, [&](uint64_t i, uint64_t x) {
-            if (i >= beg) phi[x] = idx_t(prev);
+        for (uint64_t i = beg; i < end; i++) {
+            const uint64_t x = in[i];
+            phi[x] = idx_t(prev);
             prev = x;
-        });
+        }
     });
 
     log_phase_end(prm.log, time);
@@ -577,6 +592,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
         }
     }
 
+    SA.reset();
     log_phase_end(prm.log, time);
 
     // bit i of dsa.equals_previous_bits is bit SA[i] of equals_phi_bits
@@ -588,12 +604,12 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
         const uint64_t beg = first_pos(t, p);
         const uint64_t end = first_pos(t + 1, p);
         if (beg >= end) return;
-        direct_reader in(file);
+        array_file_reader in(file, sizeof(idx_t));
 
-        for_each_value_in_file<idx_t>(in, beg, end, [&](uint64_t i, uint64_t x) {
-            SA[i] = idx_t(x);
+        for (uint64_t i = beg; i < end; i++) {
+            const uint64_t x = in[i];
             dsa.equals_previous_bits[i / 64] |= ((equals_phi_bits[x / 64] >> (x % 64)) & 1) << (i % 64);
-        });
+        }
     });
 
     log_spilled_size(prm.log, file);
@@ -618,7 +634,6 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
         starts += std::popcount(dsa.word_starts[i]);
     }
 
-    dsa.SA = index_array<idx_t>(std::move(SA), size, size - 1);
     return dsa;
 }
 
