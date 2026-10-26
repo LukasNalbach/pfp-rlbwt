@@ -29,6 +29,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -39,9 +40,10 @@
 
 #include <misc/repetitive_input.hpp>
 #include <misc/temp_files.hpp>
+#include <pfp_rlbwt/construction/parse.hpp>
 #include <pfp_rlbwt/fasta.hpp>
-#include <pfp_rlbwt/output/readers.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
+#include <rlbwt/readers.hpp>
 #include "test-fuzz.hpp"
 #include "test-references.hpp"
 
@@ -58,6 +60,9 @@ constexpr uint64_t max_window = 8;
 constexpr uint64_t max_modulus = 24;
 constexpr uint64_t max_threads = 8;
 
+// largest recursion_min_phrase_runs of a fuzzed recursive construction
+constexpr uint64_t max_recursion_min_runs = 64;
+
 // maximum number of extra sections of the runs file and maximum number of bytes of one
 constexpr uint64_t max_extra_sections = 3;
 constexpr uint64_t max_extra_section_bytes = 100;
@@ -65,6 +70,12 @@ constexpr uint64_t max_extra_section_bytes = 100;
 // largest number of runs per block of a fuzzed construction (a multiple of 8) and number of random accesses per reader
 constexpr uint64_t max_runs_per_block = 64;
 constexpr uint64_t random_accesses = 16;
+// largest number of LCP values per LCP block of a fuzzed construction
+constexpr uint64_t max_lcp_values_per_block = 2 * max_runs_per_block;
+
+/* length of the random text of the test lcp_blocks_across_batches: the compressed writer reads the records of about
+   stream_bytes bytes per batch, so the runs of the text fill several batches */
+constexpr uint64_t batches_text_length = pfp_rlbwt::direct_block_reader::stream_bytes;
 
 // the bytes of a random FASTA file, the separators its transformation uses and the largest sample period of its scan
 const std::string fasta_bytes = ">>\n\n\n\r\rACGTNacgtx \t";
@@ -73,6 +84,16 @@ constexpr uint64_t max_sample_period = 64;
 
 // the number of random ranges read from the text of a FASTA file
 constexpr uint64_t fasta_random_reads = 8;
+
+// the largest number of symbols a reader of the ranges of a FASTA file is asked for at once
+constexpr uint64_t max_fasta_block = 64;
+
+/* the bytes of the lines of a FASTA file with long lines: header lines and sequence lines of up to
+   max_long_line_windows windows of a direct_reader, so that ranges start more than a window after the start of their
+   line (see fasta_range_start) */
+const std::string fasta_long_line_bytes = "ACGTNacgtx\r \t";
+constexpr uint64_t max_long_lines = 4;
+constexpr uint64_t max_long_line_windows = 3;
 
 thread_local std::mt19937_64 gen(test_seed() + omp_get_thread_num());
 
@@ -253,9 +274,12 @@ void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& param
     EXPECT_EQ(file.sections().size(), ids.size() + params.extra_sections.size());
     EXPECT_FALSE(std::filesystem::exists(runs + pfp_rlbwt::ext_temporary_records));
     EXPECT_FALSE(std::filesystem::exists(runs + "." + std::to_string(pfp_rlbwt::section_lcp_blocks)));
-    for (const char* ext : { pfp_rlbwt::ext_dictionary_sa, pfp_rlbwt::ext_phrase_run_ends,
-             pfp_rlbwt::ext_phrase_run_symbols, pfp_rlbwt::ext_parse_isa }) {
-        EXPECT_FALSE(std::filesystem::exists(prefix + ext)) << ext;
+    // the temporary files of the first three levels (see build_level)
+    for (const std::string& level : { std::string(), std::string("_2"), std::string("_2_3") }) {
+        for (const char* ext : { pfp_rlbwt::ext_dictionary_sa, pfp_rlbwt::ext_phrase_run_ends,
+                 pfp_rlbwt::ext_parse_isa }) {
+            EXPECT_FALSE(std::filesystem::exists(prefix + level + ext)) << level << ext;
+        }
     }
 
     // the sections are stored one after another, followed by the table of contents
@@ -290,6 +314,8 @@ void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& param
     EXPECT_EQ(f.lcp_samples, lcp);
     EXPECT_EQ(f.position_bytes, position_bytes);
     EXPECT_EQ(f.symbol_bytes, sizeof(sym_t));
+    EXPECT_EQ(f.lcp_values_per_block, plain ? 0 : params.lcp_values_per_block);
+    EXPECT_EQ(file.num_lcp_blocks(), plain || !lcp ? 0 : div_ceil(r, params.lcp_values_per_block));
 
     // the plain format: the records with byte widths, read directly from the file
     if (plain) {
@@ -388,6 +414,21 @@ pfp_rlbwt::params random_params()
         params.runs_per_block = pfp_rlbwt::byte_bits * random_in(1, max_runs_per_block / pfp_rlbwt::byte_bits);
         params.runs_per_symbol_sample = random_in(1, params.runs_per_block);
     }
+
+    // the LCP block size independently of the block size: 1, up to max_lcp_values_per_block values, or the default
+    const uint64_t lcp_choice = random_in(0, 2);
+    if (lcp_choice == 0) params.lcp_values_per_block = 1;
+    else if (lcp_choice == 1) params.lcp_values_per_block = random_in(1, max_lcp_values_per_block);
+
+    // the parse is suffix-sorted recursively with probability 1/2, then also parses with few phrase runs
+    params.recursive = random_in(0, 1) == 0;
+
+    if (params.recursive) {
+        params.recursion_window = random_in(1, max_window);
+        params.recursion_modulus = random_in(1, max_modulus);
+        params.recursion_min_phrase_runs = random_in(0, max_recursion_min_runs);
+    }
+
     // 0 (the fewest bytes) or any width in [min_value_bytes..max_value_bytes]
     params.position_bytes = random_in(0, 1) == 0 ? 0 : random_in(pfp_rlbwt::min_value_bytes, pfp_rlbwt::max_value_bytes);
 
@@ -481,20 +522,44 @@ struct fasta_event_chunk : pfp_rlbwt::fasta_chunk {
     void line_end(bool header, bool after_cr) { add_fasta_event(events, { 'e', {}, uint64_t(2 * header + after_cr) }); }
 };
 
-/* checks the parallel scan of a random FASTA file (with random chunk sizes and sample periods), its line events and
-   the text that fasta_source reads from it (from the file and from memory, reversed or not, mapped or not, with the
-   samples of the scan or with samples it computes itself) against the transformation applied to the bytes one after
-   another */
-void verify_fasta()
-{
-    const pfp_rlbwt::fasta_transform transform = random_fasta_transform();
-    std::string file(random_in(0, text_length), 0);
-    for (char& c : file) c = fasta_bytes[random_in(0, fasta_bytes.size() - 1)];
-    if (random_in(0, 1) == 0 && !file.empty()) file[0] = char(pfp_rlbwt::fasta_header_marker);
-
+// a random FASTA file with a random transformation, its text, the symbol frequencies of the text and its line events
+struct fasta_case {
+    pfp_rlbwt::fasta_transform transform;
+    std::string file;
     std::string text;
     std::array<uint64_t, 256> freq {};
     std::vector<fasta_event> events;
+};
+
+/* draws a random FASTA file (of random bytes, or with up to max_long_lines long header and sequence lines) and applies
+   the transformation to its bytes one after another */
+fasta_case random_fasta_case(bool long_lines = false)
+{
+    fasta_case f;
+    f.transform = random_fasta_transform();
+    const pfp_rlbwt::fasta_transform& transform = f.transform;
+    std::string& file = f.file;
+
+    if (long_lines) {
+        for (uint64_t k = random_in(1, max_long_lines); k > 0; k--) {
+            if (random_in(0, 1) == 0) file.push_back(char(pfp_rlbwt::fasta_header_marker));
+            const uint64_t len = random_in(1, max_long_line_windows * direct_reader::block);
+
+            for (uint64_t i = 0; i < len; i++) {
+                file.push_back(fasta_long_line_bytes[random_in(0, fasta_long_line_bytes.size() - 1)]);
+            }
+
+            file.push_back(char(pfp_rlbwt::fasta_line_feed));
+        }
+    } else {
+        file.assign(random_in(0, text_length), 0);
+        for (char& c : file) c = fasta_bytes[random_in(0, fasta_bytes.size() - 1)];
+        if (random_in(0, 1) == 0 && !file.empty()) file[0] = char(pfp_rlbwt::fasta_header_marker);
+    }
+
+    std::string& text = f.text;
+    std::array<uint64_t, 256>& freq = f.freq;
+    std::vector<fasta_event>& events = f.events;
     pfp_rlbwt::fasta_transform::state_t state;
 
     for (uint64_t i = 0; i < file.size(); i++) {
@@ -524,6 +589,19 @@ void verify_fasta()
         freq[c]++;
     }
 
+    return f;
+}
+
+/* checks the parallel scan of a random FASTA file (with random chunk sizes and sample periods), its line events and
+   the text that fasta_source reads from it (from the file and from memory, reversed or not, mapped or not, with the
+   samples of the scan or with samples it computes itself) against the transformation applied to the bytes one after
+   another */
+void verify_fasta()
+{
+    const fasta_case f = random_fasta_case();
+    const pfp_rlbwt::fasta_transform& transform = f.transform;
+    const std::string& file = f.file;
+    const std::string& text = f.text;
     const pfp_rlbwt::memory_file bytes(reinterpret_cast<const uint8_t*>(file.data()), file.size());
     const uint64_t num_threads = random_in(1, max_threads);
 
@@ -535,8 +613,8 @@ void verify_fasta()
             for (const fasta_event& event : chunk.events) add_fasta_event(scanned_events, event);
         });
     ASSERT_EQ(scan.text_size, text.size());
-    ASSERT_EQ(scan.freq, freq);
-    ASSERT_TRUE(scanned_events == events);
+    ASSERT_EQ(scan.freq, f.freq);
+    ASSERT_TRUE(scanned_events == f.events);
 
     const std::string path = temporary_file_path("pfp-rlbwt-test-fasta-");
     const file_remover remover { { path } };
@@ -592,6 +670,132 @@ void verify_fasta()
     for (uint64_t i = 0; i < text.size(); i++) ASSERT_EQ(wide_read[i], wide_map[uint8_t(text[i])]) << i;
 }
 
+// returns the map that renames the symbols of a text by decreasing frequency to min_symbol, min_symbol + 1, ...
+std::array<uint8_t, 256> frequency_map(const std::array<uint64_t, 256>& freq)
+{
+    std::vector<uint8_t> symbols;
+    for (uint64_t c = 0; c < freq.size(); c++) if (freq[c] != 0) symbols.push_back(uint8_t(c));
+    std::stable_sort(symbols.begin(), symbols.end(), [&](uint8_t a, uint8_t b) { return freq[a] > freq[b]; });
+    std::array<uint8_t, 256> map {};
+    for (uint64_t i = 0; i < symbols.size(); i++) map[symbols[i]] = uint8_t(pfp_rlbwt::min_symbol + i);
+    return map;
+}
+
+/* checks the readers of the ranges of a random FASTA file (see fasta_ranges) against the transformation applied to the
+   bytes one after another: the text of each range and after it, the lengths of the ranges, the line events and the
+   samples; then that build from the ranges counts the symbol frequencies and writes the same files as build from the
+   text renamed by the frequency map */
+void verify_fasta_ranges(bool long_lines)
+{
+    const fasta_case f = random_fasta_case(long_lines);
+    const std::string& text = f.text;
+    // long lines are read from the file, whose reader reads windows (see fasta_range_start)
+    const bool in_memory = !long_lines && random_in(0, 1) == 0;
+    const std::string path = temporary_file_path("pfp-rlbwt-test-fasta-");
+    const file_remover remover { { path } };
+    std::ofstream(path, std::ios::binary).write(f.file.data(), f.file.size());
+    const uint64_t sample_period = random_in(0, max_sample_period);
+    std::vector<fasta_event> merged_events;
+
+    // the ranges of the FASTA file, from the file or from memory
+    auto new_ranges = [&](pfp_rlbwt::fasta_ranges<fasta_event_chunk>::map_fnc_t map_of) {
+        pfp_rlbwt::fasta_ranges<fasta_event_chunk>::merge_fnc_t merge = [&](fasta_event_chunk& chunk, uint64_t) {
+            for (const fasta_event& event : chunk.events) add_fasta_event(merged_events, event);
+        };
+
+        return in_memory
+            ? std::make_unique<pfp_rlbwt::fasta_ranges<fasta_event_chunk>>(
+                reinterpret_cast<const uint8_t*>(f.file.data()), f.file.size(), f.transform, map_of, merge,
+                sample_period)
+            : std::make_unique<pfp_rlbwt::fasta_ranges<fasta_event_chunk>>(path, f.transform, map_of, merge,
+                sample_period);
+    };
+
+    const auto map_of = [](const pfp_rlbwt::fasta_scan& scan) { return frequency_map(scan.freq); };
+    std::unique_ptr<pfp_rlbwt::fasta_ranges<fasta_event_chunk>> ranges = new_ranges(map_of);
+    const uint64_t p = random_in(1, max_threads);
+    ranges->split(p);
+    constexpr uint64_t unknown = pfp_rlbwt::text_ranges<uint8_t>::unknown_length;
+    uint64_t start = 0; // the position in the text of the first symbol of range i
+
+    for (uint64_t i = 0; i < p; i++) {
+        std::unique_ptr<pfp_rlbwt::text_ranges<uint8_t>::reader> reader = ranges->open(i, nullptr);
+        std::string read; // the symbols read from the start of the range on: the range and one block after it
+        uint64_t range_len = unknown;
+        bool ended = false; // the text has ended
+
+        while (range_len == unknown || read.size() <= range_len) {
+            uint64_t len;
+            const uint8_t* block = reader->next(random_in(1, max_fasta_block), len);
+            ended = len == 0;
+            if (ended) break;
+
+            // a block ends at the end of the range or lies after it
+            if (range_len == unknown && reader->range_length() != unknown) {
+                range_len = reader->range_length();
+                ASSERT_TRUE(range_len == read.size() || range_len == read.size() + len) << i;
+            }
+
+            read.append(reinterpret_cast<const char*>(block), len);
+        }
+
+        range_len = reader->range_length();
+        ASSERT_NE(range_len, unknown) << i;
+        ASSERT_EQ(read, text.substr(start, read.size())) << i;
+        if (ended) ASSERT_EQ(start + read.size(), text.size()) << i;
+        start += range_len;
+    }
+
+    ASSERT_EQ(start, text.size());
+    const std::array<uint8_t, 256>* ranges_map = ranges->ranges_read(&f.freq);
+    ASSERT_NE(ranges_map, nullptr);
+    const std::array<uint8_t, 256> map = *ranges_map;
+    ASSERT_EQ(map, frequency_map(f.freq));
+    const pfp_rlbwt::fasta_scan& scan = ranges->scan();
+    ASSERT_EQ(scan.text_size, text.size());
+    ASSERT_TRUE(merged_events == f.events);
+
+    // the samples: reads that start at them
+    if (sample_period != 0 && !text.empty()) {
+        const pfp_rlbwt::fasta_source<uint8_t> src(reinterpret_cast<const uint8_t*>(f.file.data()), f.file.size(),
+            text.size(), f.transform, scan.samples.data(), scan.samples.size());
+        std::unique_ptr<pfp_rlbwt::text_source<uint8_t>::reader> reader = src.new_reader();
+        std::string read(text.size(), 0);
+
+        for (uint64_t k = 0; k < fasta_random_reads; k++) {
+            const uint64_t pos = random_in(0, text.size() - 1);
+            const uint64_t len = random_in(1, text.size() - pos);
+            reader->read(pos, len, reinterpret_cast<uint8_t*>(read.data()));
+            ASSERT_EQ(read.substr(0, len), text.substr(pos, len)) << pos << " " << len;
+        }
+    }
+
+    // build from the ranges against build from the renamed text
+    if (text.empty() || long_lines) return;
+    const pfp_rlbwt::params params = random_params();
+    const std::string prefix = temporary_file_path("pfp-rlbwt-test-");
+    const std::string expected_prefix = temporary_file_path("pfp-rlbwt-test-");
+    file_remover output_remover { output_files(prefix) };
+    for (const std::string& file : output_files(expected_prefix)) output_remover.paths.push_back(file);
+    merged_events.clear();
+    ranges = new_ranges(map_of);
+    const pfp_rlbwt::result result = pfp_rlbwt::build(*ranges, prefix, params);
+    std::vector<uint8_t> renamed(text.begin(), text.end());
+    for (uint8_t& c : renamed) c = map[c];
+    const pfp_rlbwt::memory_source<uint8_t> source(renamed.data(), renamed.size());
+    const pfp_rlbwt::result expected = pfp_rlbwt::build(source, expected_prefix, params);
+    ASSERT_EQ(result.n_with_terminator, expected.n_with_terminator);
+    ASSERT_EQ(result.r, expected.r);
+    ASSERT_EQ(ranges->scan().freq, f.freq);
+    ASSERT_TRUE(merged_events == f.events);
+    const std::vector<std::string> files = output_files(prefix), expected_files = output_files(expected_prefix);
+
+    for (uint64_t k = 0; k < files.size(); k++) {
+        ASSERT_EQ(std::filesystem::exists(files[k]), std::filesystem::exists(expected_files[k])) << files[k];
+        if (std::filesystem::exists(files[k])) ASSERT_EQ(read_bytes(files[k]), read_bytes(expected_files[k])) << files[k];
+    }
+}
+
 } // namespace
 
 TEST(test_pfp_rlbwt, fuzz)
@@ -611,10 +815,40 @@ TEST(test_pfp_rlbwt, fuzz)
     }, fuzz_iterations(), &text_length);
 }
 
+/* checks the compressed format on a random text whose runs fill several batches of the compressed writer, with LCP
+   blocks of 1 value, of sizes that do not divide the runs of a batch and of more values than a batch has runs */
+TEST(test_pfp_rlbwt, lcp_blocks_across_batches)
+{
+    constexpr uint64_t sigma = 4;
+    std::vector<uint8_t> text(batches_text_length);
+    for (uint8_t& c : text) c = uint8_t(pfp_rlbwt::min_symbol + random_in(0, sigma - 1));
+
+    for (uint64_t lcp_values_per_block :
+        { uint64_t { 1 }, uint64_t { 7 }, uint64_t { 1000 }, batches_text_length / 4 }) {
+        pfp_rlbwt::params params;
+        params.format = pfp_rlbwt::file_format::compressed;
+        params.num_threads = random_in(2, max_threads);
+        params.runs_per_block = pfp_rlbwt::byte_bits;
+        params.runs_per_symbol_sample = random_in(1, params.runs_per_block);
+        params.lcp_values_per_block = lcp_values_per_block;
+        params.write_sa_samples = random_in(0, 1) != 0;
+        params.write_lcp_samples = true;
+        verify_build(text, params);
+    }
+}
+
 TEST(test_pfp_rlbwt, fasta_source)
 {
     run_fuzz("pfp-rlbwt-fasta", { { "random FASTA files", [](uint64_t) { verify_fasta(); }, false } },
         fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, fasta_ranges)
+{
+    run_fuzz("pfp-rlbwt-fasta-ranges", {
+        { "random FASTA files", [](uint64_t) { verify_fasta_ranges(false); }, false },
+        { "FASTA files with long lines", [](uint64_t) { verify_fasta_ranges(true); }, false },
+    }, fuzz_iterations(), &text_length);
 }
 
 TEST(test_pfp_rlbwt, file_source)
@@ -664,6 +898,34 @@ TEST(test_pfp_rlbwt, file_source)
 
 // checks that a window that overflows the text length, invalid block sizes and invalid extra sections throw, and that
 // the default block sizes work with all samples in both formats
+TEST(test_pfp_rlbwt, word_ids)
+{
+    // ids below 2^24 (3 bytes each) and then also larger ones (4 bytes each, see word_id_vector)
+    for (uint64_t rep = 0; rep < 8; rep++) {
+        const uint64_t num = random_in(1, pfp_rlbwt::block_vector<uint32_t>::min_block_size * 32);
+        const uint64_t small = random_in(0, num); // the ids before it are below 2^24
+        std::vector<uint32_t> ids(num);
+
+        for (uint64_t i = 0; i < num; i++) {
+            const uint64_t max_id = i < small ? (uint64_t { 1 } << 24) - 1 : std::numeric_limits<uint32_t>::max();
+            ids[i] = uint32_t(random_in(0, max_id));
+        }
+
+        pfp_rlbwt::word_id_vector v;
+        for (uint32_t id : ids) v.push_back(id);
+        if (random_in(0, 1) == 0) v.shrink_to_fit();
+        ASSERT_EQ(v.size(), num);
+        EXPECT_EQ(v.front(), ids.front());
+        EXPECT_EQ(v.back(), ids.back());
+        const uint64_t first = random_in(0, num);
+        pfp_rlbwt::word_id_vector::reader in(v, first);
+        for (uint64_t i = first; i < num; i++) ASSERT_EQ(in.next(), ids[i]) << i;
+        std::vector<uint32_t> moved(num);
+        v.move_to([&](uint64_t i, uint32_t id) { moved[i] = id; }, random_in(1, max_threads));
+        EXPECT_EQ(moved, ids);
+    }
+}
+
 TEST(test_pfp_rlbwt, parameter_limits)
 {
     const std::vector<uint8_t> text = random_text<uint8_t>(true);
@@ -688,6 +950,11 @@ TEST(test_pfp_rlbwt, parameter_limits)
         invalid.runs_per_symbol_sample = period;
         EXPECT_THROW(pfp_rlbwt::build(source, prefix, invalid), std::invalid_argument);
     }
+
+    // empty LCP blocks
+    pfp_rlbwt::params no_lcp_values;
+    no_lcp_values.lcp_values_per_block = 0;
+    EXPECT_THROW(pfp_rlbwt::build(source, prefix, no_lcp_values), std::invalid_argument);
 
     // an extra section with an identifier of a section of build, and two extra sections with the same identifier
     const auto write_nothing = [](std::ostream&) { };

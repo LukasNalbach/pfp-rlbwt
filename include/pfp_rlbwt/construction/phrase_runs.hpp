@@ -39,12 +39,12 @@
 
 namespace pfp_rlbwt {
 
-/* The suffixes of P that start with a word s: a phrase run i of s with m_i phrases is followed by the suffix Y_i,
-   which starts with a word other than s. The suffix starting at the phrase of run i that has j phrases of the run
-   left (j in [1..m_i]) is s^j Y_i. If Y_i < s (down), s^j Y_i < s^j' Y_i' for all j' > j, and if Y_i > s (up),
-   s^j Y_i > s^j' Y_i' for all j' > j. Hence the suffixes starting with s are ordered: first those of the down runs
-   by j in increasing order, then those of the up runs by j in decreasing order; suffixes with the same j are ordered
-   by Y_i. Layer j of a class (down or up) is the set of runs with m_i >= j; layer 1 contains all runs of the
+/* The suffixes of the parse of the phrases that start with a word s: a phrase run i of s with m_i phrases is followed
+   by the suffix Y_i, which starts with a word other than s. The suffix starting at the phrase of run i that has j
+   phrases of the run left (j in [1..m_i]) is s^j Y_i. If Y_i < s (down), s^j Y_i < s^j' Y_i' for all j' > j, and if
+   Y_i > s (up), s^j Y_i > s^j' Y_i' for all j' > j. Hence the suffixes starting with s are ordered: first those of the
+   down runs by j in increasing order, then those of the up runs by j in decreasing order; suffixes with the same j are
+   ordered by Y_i. Layer j of a class (down or up) is the set of runs with m_i >= j; layer 1 contains all runs of the
    class, and the suffix with j = m_i is the head of run i (the suffix starting at its first phrase). */
 
 /**
@@ -285,17 +285,18 @@ public:
 };
 
 /**
- * @brief the suffixes of P that start with a word s with a phrase run of at least two phrases: their offsets
- *        q in [0..occ-1] in the range of the suffixes starting with s are the down class (layers 1, 2, ...), then
- *        the up class (layers ..., 2, 1). The heads, in increasing order of their offsets, are the runs of s in the
- *        order of the suffix array of the parse of the phrase runs.
+ * @brief the suffixes of the parse of the phrases that start with a word s with a phrase run of at least two phrases:
+ *        their offsets q in [0..occ-1] in the range of the suffixes starting with s are the down class (layers 1, 2,
+ *        ...), then the up class (layers ..., 2, 1). The heads, in increasing order of their offsets, are the runs of s
+ *        in the order of the suffix array of the parse of the phrase runs.
  */
 struct repeated_word_ranks {
     uint64_t word = 0; // the word s
     uint64_t occ = 0; // the number of phrases equal to s
     uint64_t advance = 0; // the advance of s
     uint64_t first_run = 0; // the rank of the first run of s in the suffix array of the parse of the phrase runs
-    uint64_t first_rank = 0; // the rank of the first suffix of P that starts with s among the suffixes of P
+    // the rank of the first suffix that starts with s among the suffixes of the parse of the phrases
+    uint64_t first_rank = 0;
     run_class down, up;
     /* the offsets of the heads in increasing order: [0..R-1] head_offset[b] = the offset of the head of the b-th run of
        s in the order of the suffix array of the parse of the phrase runs */

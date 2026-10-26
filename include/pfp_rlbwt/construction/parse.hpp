@@ -30,37 +30,48 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <exception>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
-#include <misc/sort.hpp>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #include <omp.h>
 
+#include <misc/hashing.hpp>
+#include <misc/log.hpp>
 #include <misc/memory.hpp>
+#include <misc/sort.hpp>
 #include <pfp_rlbwt/construction/common.hpp>
 #include <pfp_rlbwt/construction/phrase_runs.hpp>
+#include <pfp_rlbwt/text_ranges.hpp>
 #include <pfp_rlbwt/types.hpp>
 
 namespace pfp_rlbwt {
 
 /* The prefix-free parsing of S = $ T $^w: a window S[b..b+w-1] with 1 <= b and b+w-1 <= n is a trigger string if
-   its hash is selected (see rolling_window_hash); with b_1 < ... < b_{K-1} the starts of the trigger strings,
+   its hash is below a threshold (see rolling_window_hash); with b_1 < ... < b_{K-1} the starts of the trigger strings,
    b_0 = 0 and b_K = n+1, phrase k is S[b_k..e_k] with e_k = b_{k+1}+w-1. Consecutive phrases overlap by w symbols.
    Each position x in [0..n] of S lies in exactly one range [b_k..e_k-w]; the suffix of S starting at x corresponds
    to the suffix of T$ starting at x-1 (x >= 1) and to the suffix $ (x = 0). A phrase run is a maximal run of equal
-   consecutive phrases; the parsing stores the J phrase runs, each with the end of its last phrase. Phrase run i
+   consecutive phrases; the parsing stores the J phrase runs by their words and numbers of phrases. Phrase run i
    consists of m_i phrases equal to a word of length w + a, where a is the advance of the word, and ends at
-   F_i = F_{i-1} + m_i * a (F_{-1} = w-1). */
+   F_i = F_{i-1} + m_i * a (F_{-1} = w-1). P, the parse of the phrase runs, has one symbol per phrase run (see
+   phrase_arrays::P). */
 
 // the dictionary: the distinct phrases (words) in lexicographic order
 template <typename sym_t>
 struct dictionary {
     uint64_t num_words = 0; // D, the number of words
     uint64_t size = 0; // total length of the words and their separators
-    // the words: [0..size-1] the words in lexicographic order, each followed by separator
+    // the words: [0..size-1] the words in lexicographic order, each followed by the separator
     malloc_array_t<sym_t> text;
     // the starting positions of the words: [0..D] word_start[s] = position of word s in text; word_start[D] = size
     uint_array word_start;
@@ -71,16 +82,179 @@ struct dictionary {
     inline uint64_t length(uint64_t s) const { return word_start[s + 1] - word_start[s] - 1; }
 };
 
-/* the phrase runs one thread has found, in text order; for j in [0..word_ids.size()-1], entry j belongs to the j-th
-   of them, phrases k..k'; aligned to a cache line (the threads append to different ones) */
-template <typename sym_t>
+// appends x as a varint to a sequence of bytes: 7 bits per byte, the low bits first, the high bit set in each byte but
+// the last
+template <typename seq_t>
+inline void append_varint(seq_t& out, uint64_t x)
+{
+    for (; x >= 128; x >>= 7) out.push_back(uint8_t((x & 127) | 128));
+    out.push_back(uint8_t(x));
+}
+
+// returns the next varint of a reader of a sequence of bytes (see append_varint)
+template <typename reader_t>
+inline uint64_t read_varint(reader_t& in)
+{
+    uint64_t x = 0;
+
+    for (uint8_t shift = 0;; shift += 7) {
+        const uint8_t c = in.next();
+        x |= uint64_t(c & 127) << shift;
+        if (c < 128) return x;
+    }
+}
+
+/**
+ * @brief the word ids of the phrase runs a thread has found (see word_table), in blocks that grow as in block_vector; a
+ *        block stores 3 bytes per id while the ids are below 2^24, and a larger id starts a block with 4 bytes per id,
+ *        as do all blocks after it
+ */
+class word_id_vector {
+private:
+    // bytes per id below 2^(8 short_bytes), and per larger id
+    static constexpr uint8_t short_bytes = 3, long_bytes = sizeof(uint32_t);
+    static constexpr uint64_t short_mask = (uint64_t { 1 } << (8 * short_bytes)) - 1;
+
+    struct block {
+        // the ids, width bytes each, followed by long_bytes - width bytes (get reads long_bytes bytes per id)
+        malloc_array_t<uint8_t> bytes;
+        uint64_t size; // the number of ids
+        uint8_t width; // bytes per id
+    };
+
+public:
+    // reads the ids in order without freeing them
+    class reader {
+    private:
+        const word_id_vector& v;
+        uint64_t b = 0; // the block of the next id
+        uint64_t i = 0; // the index of the next id in its block
+
+    public:
+        // reads from id first on
+        explicit reader(const word_id_vector& v, uint64_t first = 0) : v(v)
+        {
+            while (b < v.blocks.size() && first >= v.blocks[b].size) first -= v.blocks[b++].size;
+            if (b == v.blocks.size() && b != 0) i = v.blocks[--b].size; // first = size(): at the end of the last block
+            else i = first;
+        }
+
+        // returns the next id (there has to be one)
+        inline uint32_t next()
+        {
+            if (i == v.blocks[b].size) {
+                b++;
+                i = 0;
+            }
+
+            return get(v.blocks[b], i++);
+        }
+    };
+
+private:
+    /* the blocks: [0..blocks.size()-1] blocks[b] stores the ids after those of the blocks before it; block b has room
+       for min(2^b block_vector<uint32_t>::min_block_size, max_block_bytes / width) ids */
+    std::vector<block> blocks;
+    uint64_t capacity = 0; // the number of ids the last block has room for
+
+    // returns id i of block b
+    static inline uint32_t get(const block& b, uint64_t i)
+    {
+        uint32_t id;
+        std::memcpy(&id, b.bytes.get() + i * b.width, sizeof(uint32_t));
+        return b.width == long_bytes ? id : uint32_t(id & short_mask);
+    }
+
+    // appends a block with room for more ids than the last one, with 4 bytes per id if id or the last block needs them
+    void add_block(uint32_t id)
+    {
+        const uint8_t width = id > short_mask || (!blocks.empty() && blocks.back().width == long_bytes)
+            ? long_bytes : short_bytes;
+        capacity = blocks.empty() ? block_vector<uint32_t>::min_block_size
+                                  : std::min<uint64_t>(2 * capacity, max_block_bytes / width);
+        blocks.push_back({ new_malloc_array<uint8_t>(capacity * width + long_bytes - width), 0, width });
+    }
+
+public:
+    inline void push_back(uint32_t id)
+    {
+        if (blocks.empty() || blocks.back().size == capacity || (id > short_mask && blocks.back().width == short_bytes))
+            [[unlikely]] {
+            add_block(id);
+        }
+
+        block& b = blocks.back();
+        std::memcpy(b.bytes.get() + b.size * b.width, &id, b.width);
+        b.size++;
+    }
+
+    uint64_t size() const
+    {
+        uint64_t s = 0;
+        for (const block& b : blocks) s += b.size;
+        return s;
+    }
+
+    // frees the unused part of the last block
+    void shrink_to_fit()
+    {
+        if (blocks.empty() || blocks.back().size == capacity) return;
+        block& b = blocks.back();
+        resize_malloc_array(b.bytes, b.size * b.width + long_bytes - b.width);
+        capacity = b.size;
+    }
+
+    // returns the first id (the sequence must not be empty)
+    uint32_t front() const { return get(blocks.front(), 0); }
+
+    // returns the last id (the sequence must not be empty)
+    uint32_t back() const { return get(blocks.back(), blocks.back().size - 1); }
+
+    /**
+     * @brief calls fnc(i, id) for the i-th id of the sequence, for each i, and frees the blocks; the blocks are
+     *        processed in parallel and in any order
+     * @param fnc function called for each id
+     * @param threads number of threads
+     */
+    template <typename fnc_t>
+    void move_to(fnc_t fnc, uint16_t threads)
+    {
+        // offsets[b] = number of ids in the blocks before block b
+        std::vector<uint64_t> offsets(blocks.size() + 1, 0);
+        for (uint64_t b = 0; b < blocks.size(); b++) offsets[b + 1] = offsets[b] + blocks[b].size;
+        std::vector<std::exception_ptr> failures(blocks.size());
+
+        #pragma omp parallel for num_threads(threads) schedule(dynamic, 1)
+        for (uint64_t b = 0; b < blocks.size(); b++) {
+            try {
+                for (uint64_t i = 0; i < blocks[b].size; i++) fnc(offsets[b] + i, get(blocks[b], i));
+            } catch (...) {
+                failures[b] = std::current_exception();
+            }
+
+            blocks[b].bytes.reset();
+        }
+
+        blocks.clear();
+        capacity = 0;
+        rethrow_first_exception(failures);
+    }
+};
+
+/* the phrase runs one thread has found, in text order (the j-th of them consists of the phrases k..k'); aligned to a
+   cache line (the threads append to different ones) */
 struct alignas(cache_line_bytes) thread_phrases {
-    // word_ids[j] = id of the word equal to the phrases k..k' (see word_table)
-    block_vector<uint32_t> word_ids;
-    // symbol_before_next[j] = S[e_k-w], the symbol before phrase k+1 (the same for each phrase of the run)
-    block_vector<sym_t> symbol_before_next;
-    // the ends: bytes [j * position_bytes..(j + 1) * position_bytes - 1] store e_k' (little endian, see parsing)
-    block_vector<uint8_t> ends;
+    // [0..num_runs-1] word_ids[j] = id of the word equal to the phrases k..k' of the j-th phrase run (see word_table)
+    word_id_vector word_ids;
+    /* bit j % 64 of multi_runs[j / 64] = 1 <=> the j-th phrase run has two phrases or more; the bits of the phrase runs
+       after the last full word are in multi_bits */
+    block_vector<uint64_t> multi_runs;
+    uint64_t multi_bits = 0;
+    // the numbers of phrases k' - k + 1 of the phrase runs with two phrases or more, one varint each (see read_varint)
+    block_vector<uint8_t> copies;
+    uint64_t num_runs = 0; // the number of phrase runs
+    uint64_t length = 0; // the total length of the phrase runs (their numbers of phrases times their advances)
+    uint64_t last_copies = 0; // the number of phrases of the last phrase run
     // the ids of the words of the phrase runs with at least two phrases (with repetitions)
     std::vector<uint32_t> repeated_ids;
 };
@@ -96,7 +270,7 @@ struct parsing {
     uint8_t position_bytes = 0; // bytes per position of S in the arrays (see uint_array)
     dictionary<sym_t> dict;
     // the phrases found by the threads: [0..p-1] phrases_of_thread[i] = the phrase runs found by thread i
-    std::vector<thread_phrases<sym_t>> phrases_of_thread;
+    std::vector<thread_phrases> phrases_of_thread;
     /* [0..p-1] continues[i] = 1 <=> the last phrase run of thread i continues in the next thread with phrase runs
        (that thread stores the run) */
     std::vector<char> continues;
@@ -118,49 +292,96 @@ struct repeated_word {
 // the phrase runs as arrays
 template <typename idx_t, typename sym_t>
 struct phrase_arrays {
-    /* the parse of the phrase runs: [0..J] P[i] = 1 + letter of phrase run i; P[J] = 0. The letters are ordered by
-       word; the phrase runs of a word in repeated_words get one letter per key (see run_key), the others one
-       letter per word */
+    /* the parse of the phrase runs (if it is not suffix-sorted recursively): [0..J] P[i] = 1 + letter of phrase run i;
+       P[J] = 0. The letters are ordered by word; the phrase runs of a word in repeated_words get one letter per key
+       (see run_key), the others one letter per word */
     malloc_array_t<idx_t> P;
     uint64_t num_letters = 0; // the number of letters
     uint8_t position_bytes = 0; // bytes per end of a phrase run
-    /* the files of the phrase runs in text order, until build_parse_sa orders them by rank:
+    /* the ends of the phrase runs in text order (in a file, see temporary_array), until they are ordered by rank:
        value i in [0..J-1] of ends_file = F_i, the end of the last phrase of run i (position_bytes bytes, little
-       endian); value i in [0..J-1] of symbols_file = the symbol before the phrase after a phrase of run i */
-    temporary_file ends_file, symbols_file;
-    sym_t last_symbol = 0; // value J-1 of symbols_file
+       endian) */
+    temporary_array ends_file;
+    sym_t last_symbol = 0; // the symbol before the last w symbols of the word of the last run
     /* the ends in the order of the suffix array SA of the parse of the phrase runs: [0..J] ends_by_rank[x] =
        F_{SA[x]-1}, the end of the run before run SA[x] (F_{-1} = w-1 for SA[x] = 0) */
     uint_array ends_by_rank;
-    /* the symbols in the order of SA: [0..J] symbols_by_rank[x] = the symbol before the first phrase of run
-       SA[x]-1, which is value SA[x]-2 of symbols_file (value J-1 if SA[x] <= 1) */
-    malloc_array_t<sym_t> symbols_by_rank;
-    // the words with a phrase run of at least two phrases, in increasing order
+    /* the BWT symbols of the values of P: [0..num_letters] value_symbols[v] = the symbol before the last w symbols of
+       the word of value v (see symbols_of_values) */
+    std::vector<sym_t> value_symbols;
+    // the R words with a phrase run of at least two phrases, in increasing order
     std::vector<repeated_word> repeated_words;
     ranked_bits repeated_set; // the set of these words
+    // [0..R] letters_before[y] = the number of letters of the words repeated_words[0..y-1] minus y
+    std::vector<uint64_t> letters_before;
+    // (i, letter of phrase run i) for the phrase runs i of the repeated words, in increasing order of i
+    std::vector<std::pair<uint64_t, uint64_t>> repeated_run_letters;
+    /* if the parse is suffix-sorted recursively, instead of P: the phrase runs as the parsing threads found them (only
+       their word ids, see thread_phrases), the ranks of their words (see parsing::word_rank) and, for each part,
+       [0..parts] run_offsets[u] = the number of phrase runs the parts before part u store (see build_phrase_arrays) */
+    std::vector<thread_phrases> runs_of_part;
+    malloc_array_t<uint32_t> word_rank;
+    std::vector<uint64_t> run_offsets;
+
+    /* the letters per word id: [0..D-1] id_letter[id] = the letter of the phrase runs of the word with id `id`, or
+       num_letters if the word is repeated (see repeated_run_letters) */
+    uint_array id_letter;
+
+    // returns the letter of phrase run i, whose word has the id `id`
+    inline uint64_t letter_of(uint64_t i, uint64_t id) const
+    {
+        const uint64_t letter = id_letter[id];
+        if (letter != num_letters) [[likely]] return letter;
+        return std::lower_bound(repeated_run_letters.begin(), repeated_run_letters.end(),
+            std::make_pair(i, uint64_t { 0 }))->second;
+    }
+
+    // frees the word ids of the phrase runs, the ranks of the words and the letters per word id (see runs_of_part)
+    void free_word_ids()
+    {
+        runs_of_part = std::vector<thread_phrases>();
+        word_rank.reset();
+        id_letter = uint_array();
+    }
 };
 
 /* returns the key of a phrase run with m phrases that is followed by a smaller (down) or larger suffix: the keys of
    the down runs increase with m, those of the up runs decrease with m and are larger */
 inline uint64_t run_key(bool down, uint64_t m) { return down ? m : std::numeric_limits<uint64_t>::max() - m; }
 
-// floor(2^64 / golden ratio), the multiplier of Fibonacci hashing
-constexpr uint64_t golden_ratio_64 = 0x9E3779B97F4A7C15;
+// returns the number of phrases m of a phrase run with the key run_key(down, m) (m < 2^63)
+inline uint64_t run_copies(uint64_t key)
+{
+    return key < (uint64_t { 1 } << 63) ? key : std::numeric_limits<uint64_t>::max() - key;
+}
 
-/* a parse with fewer than n / (degenerate_parse_tolerance * modulus) phrases is degenerate (it is expected to have about
-   n / modulus phrases); the seed of the trigger strings (see rolling_window_hash) is then switched between 0 and
-   retry_trigger_seed: before the parse on a sample (see choose_trigger_seed), and after it, if the parse is degenerate */
+/* a parse with fewer than n / (degenerate_parse_tolerance * modulus) phrases is degenerate (it is expected to have
+   about n / modulus phrases); the seed of the trigger strings (see rolling_window_hash) is then switched between 0
+   and retry_trigger_seed: before the parse on a sample (see choose_trigger_seed), and after it, if the parse is
+   degenerate */
 constexpr uint64_t degenerate_parse_tolerance = 2;
 constexpr uint64_t retry_trigger_seed = golden_ratio_64;
 
-// number of symbols read from the text at once
-constexpr uint64_t read_block_size = uint64_t { 1 } << 20;
+/* number of bytes a parsing thread reads from the text at once; on the levels after the first of the recursive
+   prefix-free parsing, whose texts are in RAM, level_block_bytes */
+constexpr uint64_t parse_block_bytes = uint64_t { 1 } << 20;
+constexpr uint64_t level_block_bytes = uint64_t { 1 } << 16;
+
+// number of symbols of type sym_t a parsing thread reads from the text at once
+template <typename sym_t>
+inline uint64_t block_symbols()
+{
+    return (current_level == 1 ? parse_block_bytes : level_block_bytes) / sizeof(sym_t);
+}
+
+// number of bytes of the ends of phrase runs a thread collects before it writes them
+constexpr uint64_t run_buffer_bytes = uint64_t { 1 } << 18;
 
 // number of bytes of the first and of the largest blocks of a word_arena
 constexpr uint64_t min_arena_block_size = uint64_t { 1 } << 16;
 constexpr uint64_t max_arena_block_size = uint64_t { 1 } << 20;
 
-// base-2 logarithm of the number of entries per block of the entries of the words (see word_table)
+// base-2 logarithm of the number of word entries per block of word_table::blocks
 constexpr uint8_t log_entries_per_block = 16;
 
 // number of shards of the word table per thread
@@ -196,44 +417,27 @@ inline uint64_t string_hash(const uint8_t* s, uint64_t len)
 
 /**
  * @brief the polynomial hash (mod 2^64, base golden_ratio_64) of the last w symbols of S, updated symbol by symbol;
- *        the window is a trigger string if the mixed hash, xor the seed, is smaller than UINT64_MAX / modulus
+ *        the window is a trigger string if mix(hash xor seed) is smaller than UINT64_MAX / modulus
  */
 template <typename sym_t>
 class rolling_window_hash {
 private:
-    uint64_t w; // w, the window length
-    // the last w symbols: ring[x & mask] = S[x] for the last w positions x added; bit_ceil(w) entries
-    std::vector<sym_t> ring;
-    uint64_t mask; // bit_ceil(w) - 1
     uint64_t threshold; // UINT64_MAX / modulus
     uint64_t pow_w = 1; // golden_ratio_64^w
     uint64_t hash = 0; // the hash of the window
     uint64_t seed; // selects the trigger strings (see is_trigger)
 
 public:
-    rolling_window_hash(uint64_t w, uint64_t modulus, uint64_t seed)
-        : w(w), ring(std::bit_ceil(w), 0), mask(std::bit_ceil(w) - 1), threshold(UINT64_MAX / modulus), seed(seed)
+    rolling_window_hash(uint64_t w, uint64_t modulus, uint64_t seed) : threshold(UINT64_MAX / modulus), seed(seed)
     {
         for (uint64_t i = 0; i < w; i++) pow_w *= golden_ratio_64;
     }
 
-    // appends S[pos] = c to the window (the windows must be appended at consecutive positions)
-    inline void add(uint64_t pos, sym_t c)
-    {
-        const sym_t out = ring[(pos - w) & mask];
-        ring[pos & mask] = c;
-        hash = hash * golden_ratio_64 + uint64_t(c) - uint64_t(out) * pow_w;
-    }
+    // appends c to the window; out is the symbol w positions before c, which leaves it (0 if there is none)
+    inline void add(sym_t c, sym_t out) { hash = hash * golden_ratio_64 + uint64_t(c) - uint64_t(out) * pow_w; }
 
     // returns whether the window is a trigger string
     inline bool is_trigger() const { return mix(hash ^ seed) < threshold; }
-
-    // replaces dst with the window S[pos-w+1..pos]
-    void copy_to(uint64_t pos, std::vector<sym_t>& dst) const
-    {
-        dst.clear();
-        for (uint64_t x = pos + 1 - w; x <= pos; x++) dst.push_back(ring[x & mask]);
-    }
 };
 
 // the strings of the words a thread has added to the dictionary, in blocks that grow from min_arena_block_size to
@@ -293,6 +497,7 @@ public:
 private:
     static constexpr uint64_t entry_mask = (uint64_t { 1 } << log_entries_per_block) - 1;
 
+    // a slot of a shard
     struct slot {
         uint64_t hash; // the hash of the word
         uint32_t id_plus_1; // 0 <=> the slot is empty
@@ -434,37 +639,38 @@ public:
 };
 
 /**
- * @brief parses the phrases of S starting in [lo, hi) and appends their phrase runs to out
- * @param text the text T
- * @param lo first starting position of S
- * @param hi starting position of S after the last one
- * @param first true <=> the phrase starting at 0 is parsed too
- * @param prm parameters (window, modulus, position_bytes)
+ * @brief parses the phrases of S starting in a range of T (see text_ranges) and appends their phrase runs to out;
+ *        positions are counted from the range on: its first symbol is at position 1 (in the first range, as in S)
+ * @param in reads T from the start of the range on
+ * @param first true <=> the range is the first one; the phrase starting at 0 is parsed too
+ * @param prm parameters (window and modulus)
  * @param seed the seed of the trigger strings (see rolling_window_hash)
  * @param table the word table
  * @param arena the arena of the calling thread
  * @param out the phrases of the calling thread
+ * @param block_len number of symbols read at once (see block_symbols)
  * @return the largest symbol read
  */
 template <typename sym_t>
-uint64_t parse_phrases_in_range(const text_source<sym_t>& text, uint64_t lo, uint64_t hi, bool first,
-    const params& prm, uint64_t seed, word_table<sym_t>& table, word_arena& arena, thread_phrases<sym_t>& out)
+uint64_t parse_phrases_in_range(typename text_ranges<sym_t>::reader& in, bool first, const params& prm,
+    uint64_t seed, word_table<sym_t>& table, word_arena& arena, thread_phrases& out, uint64_t block_len)
 {
-    const uint64_t n = text.size();
     const uint64_t w = prm.window;
-    std::unique_ptr<typename text_source<sym_t>::reader> reader = text.new_reader();
-    malloc_array_t<sym_t> block = new_malloc_array<sym_t>(read_block_size);
     rolling_window_hash<sym_t> window(w, prm.modulus, seed);
     std::vector<sym_t> phrase; // S[b_k..x], where x is the position read last
     bool in_phrase = first;
     if (first) phrase.push_back(dollar);
-    uint64_t x = first ? 1 : lo; // next position of S to read
+    uint64_t x = 1; // next position to read
     const uint64_t check_from = x + w - 1; // the first position at which the window has w symbols
+    // the position after the range (unknown_length until the reader has passed the end of the range)
+    uint64_t range_end = text_ranges<sym_t>::unknown_length;
     uint64_t max_sym = 0;
+    /* the w symbols before the current block (0 before the range): w_before[i] leaves the window when block[i] enters
+       it, for i < w (for i >= w, block[i - w] leaves it) */
+    std::vector<sym_t> w_before(w, 0);
 
     std::vector<sym_t> run_phrase; // the phrase of the last phrase run, if it is not yet appended to out
-    uint64_t run_copies = 0; // the number of phrases of that run (0: there is none)
-    uint64_t run_end = 0; // the end of its last phrase
+    uint64_t m = 0; // m, the number of phrases of that run (0: there is none)
 
     // a word of a phrase run and its occurrences that are not yet added to the word table
     struct counted_word {
@@ -479,26 +685,38 @@ uint64_t parse_phrases_in_range(const text_source<sym_t>& text, uint64_t lo, uin
 
     // appends the last phrase run to out
     auto append_run = [&]() {
-        if (run_copies == 0) return;
+        if (m == 0) return;
         const uint64_t len = run_phrase.size();
         const uint64_t hash = string_hash((const uint8_t*) run_phrase.data(), len * sizeof(sym_t));
         counted_word& older = recent[1];
 
         if (older.hash == hash && older.id != word_table<sym_t>::max_words
                 && table.is_word(older.id, run_phrase.data(), len)) {
-            older.pending += run_copies;
+            older.pending += m;
             std::swap(recent[0], recent[1]);
         } else {
             if (older.pending != 0) table.add_occurrences(older.id, older.hash, older.pending);
             recent[1] = recent[0];
-            recent[0] = { hash, table.count_occurrences(run_phrase.data(), len, hash, run_copies, arena), 0 };
+            recent[0] = { hash, table.count_occurrences(run_phrase.data(), len, hash, m, arena), 0 };
         }
 
         out.word_ids.push_back(uint32_t(recent[0].id));
-        out.symbol_before_next.push_back(run_phrase[len - w - 1]);
-        for (uint8_t b = 0; b < prm.position_bytes; b++) out.ends.push_back(uint8_t(run_end >> (8 * b)));
-        if (run_copies >= 2) out.repeated_ids.push_back(out.word_ids.back());
-        run_copies = 0;
+        constexpr uint64_t word_bits = std::numeric_limits<uint64_t>::digits;
+
+        if (m >= 2) {
+            out.multi_bits |= uint64_t { 1 } << (out.num_runs % word_bits);
+            append_varint(out.copies, m);
+        }
+
+        if (++out.num_runs % word_bits == 0) {
+            out.multi_runs.push_back(out.multi_bits);
+            out.multi_bits = 0;
+        }
+
+        out.length += m * (len - w);
+        out.last_copies = m;
+        if (m >= 2) out.repeated_ids.push_back(out.word_ids.back());
+        m = 0;
     };
 
     // appends the last phrase run and adds the pending occurrences to the word table
@@ -512,93 +730,129 @@ uint64_t parse_phrases_in_range(const text_source<sym_t>& text, uint64_t lo, uin
         return max_sym;
     };
 
-    // adds the phrase ending at position end of S to the last phrase run or starts a new one with it
-    auto add_phrase = [&](uint64_t end) {
-        if (run_copies == 0 || phrase.size() != run_phrase.size()
+    // adds the phrase to the last phrase run or starts a new one with it
+    auto add_phrase = [&]() {
+        if (m == 0 || phrase.size() != run_phrase.size()
                 || std::memcmp(phrase.data(), run_phrase.data(), phrase.size() * sizeof(sym_t)) != 0) {
             append_run();
             run_phrase.swap(phrase);
             phrase.assign(run_phrase.end() - w, run_phrase.end());
         }
 
-        run_copies++;
-        run_end = end;
+        m++;
     };
 
-    while (x <= n) {
-        const uint64_t len = std::min(read_block_size, n + 1 - x);
-        reader->read(x - 1, len, block.get());
-        const auto [min_blk, max_blk] = std::minmax_element(block.get(), block.get() + len);
-        if (*min_blk < min_symbol) throw std::invalid_argument("pfp_rlbwt: the text contains a symbol < min_symbol");
-        max_sym = std::max<uint64_t>(max_sym, *max_blk);
+    while (true) {
+        uint64_t len;
+        const sym_t* block = in.next(block_len, len);
+        if (len == 0) break;
+        const uint64_t range_len = in.range_length();
+        if (range_len != text_ranges<sym_t>::unknown_length) range_end = 1 + range_len;
+        sym_t min_blk = block[0], max_blk = block[0];
+
+        for (uint64_t i = 1; i < len; i++) {
+            min_blk = std::min(min_blk, block[i]);
+            max_blk = std::max(max_blk, block[i]);
+        }
+
+        if (min_blk < min_symbol) throw std::invalid_argument("pfp_rlbwt: the text contains a symbol < min_symbol");
+        max_sym = std::max<uint64_t>(max_sym, max_blk);
         uint64_t copied = 0; // the symbols block[0..copied-1] have been appended to phrase or are not in a phrase
 
-        for (uint64_t i = 0; i < len; i++) {
-            const uint64_t pos = x + i;
-            window.add(pos, block[i]);
-            if (pos < check_from || !window.is_trigger()) [[likely]] continue;
-            const uint64_t b = pos + 1 - w; // start of the trigger string
+        /* ends the current phrase with the trigger string that ends at block[i] and starts the next one with it;
+           returns whether the next phrase starts after the range */
+        auto trigger = [&](uint64_t i) {
+            const uint64_t b = x + i + 1 - w; // start of the trigger string
 
             if (in_phrase) {
-                phrase.insert(phrase.end(), block.get() + copied, block.get() + i + 1);
-                add_phrase(pos);
-
-                if (b >= hi) return finish();
+                phrase.insert(phrase.end(), block + copied, block + i + 1);
+                add_phrase();
+                if (b >= range_end) return true;
                 phrase.erase(phrase.begin(), phrase.end() - w);
             } else {
-                if (b >= hi) return finish();
-                window.copy_to(pos, phrase);
+                if (b >= range_end) return true;
+                // the trigger string: the last w - i - 1 symbols before the block (if i + 1 < w) and block[..i]
+                const uint64_t in_block = std::min(w, i + 1);
+                phrase.assign(w_before.begin() + in_block, w_before.end());
+                phrase.insert(phrase.end(), block + i + 1 - in_block, block + i + 1);
                 in_phrase = true;
             }
 
             copied = i + 1;
+            return false;
+        };
+
+        // the positions before check_from complete the first window; from in_block on, block[i - w] leaves the window
+        const uint64_t first_check = std::min(len, check_from - std::min(check_from, x));
+        const uint64_t in_block = std::max(first_check, std::min(len, w));
+        for (uint64_t i = 0; i < first_check; i++) window.add(block[i], w_before[i]);
+
+        for (uint64_t i = first_check; i < in_block; i++) {
+            window.add(block[i], w_before[i]);
+            if (window.is_trigger() && trigger(i)) return finish();
         }
 
-        if (in_phrase) phrase.insert(phrase.end(), block.get() + copied, block.get() + len);
+        for (uint64_t i = in_block; i < len; i++) {
+            window.add(block[i], block[i - w]);
+            if (!window.is_trigger()) [[likely]] continue;
+            if (trigger(i)) return finish();
+        }
+
+        if (in_phrase) phrase.insert(phrase.end(), block + copied, block + len);
+
+        // the w symbols before the next block
+        if (len >= w) {
+            std::copy(block + len - w, block + len, w_before.begin());
+        } else {
+            std::move(w_before.begin() + len, w_before.end(), w_before.begin());
+            std::copy(block, block + len, w_before.end() - len);
+        }
+
         x += len;
     }
 
     // the last phrase ends with $^w
     if (in_phrase) {
         phrase.insert(phrase.end(), w, sym_t(dollar));
-        add_phrase(n + w);
+        add_phrase();
     }
 
     return finish();
 }
 
 /**
- * @brief chooses the seed of the trigger strings (see rolling_window_hash) from a sample of T, the first read_block_size
- *        symbols of each of the p ranges the text is parsed in: 0, unless the sample has fewer than
- *        1 / (degenerate_parse_tolerance * modulus) trigger strings per window with it and more with retry_trigger_seed
+ * @brief chooses the seed of the trigger strings (see rolling_window_hash) from a sample of T, the first
+ *        block_symbols<sym_t>() symbols of each of the p ranges the text is parsed in: 0, unless the sample has fewer
+ *        than 1 / (degenerate_parse_tolerance * modulus) trigger strings per window with it and more with
+ *        retry_trigger_seed
  * @param text the text T
  * @param prm parameters (window, modulus, num_threads)
  * @return the seed
  */
 template <typename sym_t>
-uint64_t choose_trigger_seed(const text_source<sym_t>& text, const params& prm)
+uint64_t choose_trigger_seed(text_ranges<sym_t>& text, const params& prm)
 {
     const uint16_t p = prm.num_threads;
-    const uint64_t n = text.size();
     const uint64_t w = prm.window;
     std::vector<uint64_t> windows(p, 0), triggers(p, 0), retry_triggers(p, 0);
+    const uint64_t block_len = block_symbols<sym_t>(); // evaluated in this thread (see current_level)
 
     run_on_threads(p, [&](uint64_t t, uint64_t team_size) {
-        malloc_array_t<sym_t> block = new_malloc_array<sym_t>(read_block_size);
-        std::unique_ptr<typename text_source<sym_t>::reader> reader = text.new_reader();
-
         for (uint64_t i = t; i < p; i += team_size) {
-            const uint64_t lo = (i * n) / p;
-            const uint64_t len = std::min(read_block_size, ((i + 1) * n) / p - lo);
-            reader->read(lo, len, block.get());
+            std::unique_ptr<typename text_ranges<sym_t>::reader> reader = text.open(i, nullptr);
+            uint64_t len;
+            const sym_t* block = reader->next(block_len, len);
+            // the first block lies after the range only if the range is empty
+            if (len == 0 || reader->range_length() == 0) continue;
             rolling_window_hash<sym_t> window(w, prm.modulus, 0);
             rolling_window_hash<sym_t> retry_window(w, prm.modulus, retry_trigger_seed);
             uint64_t num_triggers = 0;
             uint64_t num_retry_triggers = 0;
 
             for (uint64_t x = 0; x < len; x++) {
-                window.add(x, block[x]);
-                retry_window.add(x, block[x]);
+                const sym_t out = x >= w ? block[x - w] : sym_t(0);
+                window.add(block[x], out);
+                retry_window.add(block[x], out);
                 if (x + 1 < w) continue;
                 num_triggers += window.is_trigger();
                 num_retry_triggers += retry_window.is_trigger();
@@ -618,52 +872,165 @@ uint64_t choose_trigger_seed(const text_source<sym_t>& text, const params& prm)
 }
 
 /**
+ * @brief returns the frequencies of the symbols of T (of one byte) from the words of the parsing: each position of $ T
+ *        lies in the first len - w symbols of exactly one phrase of length len (see parse; the dollar is not counted)
+ * @param table the word table
+ * @param w the length of a trigger string
+ * @param p number of threads
+ */
+template <typename sym_t>
+std::array<uint64_t, 256> count_symbols(word_table<sym_t>& table, uint64_t w, uint16_t p)
+{
+    const uint64_t D = table.size();
+    std::array<uint64_t, 256> freq {};
+
+    #pragma omp parallel num_threads(p)
+    {
+        std::array<uint64_t, 256> counts {}; // the counts of the words of this thread
+
+        #pragma omp for
+        for (uint64_t s = 0; s < D; s++) {
+            const word_entry<sym_t>& e = table.entry(s);
+            for (uint64_t k = 0; k + w < e.len; k++) counts[e.str[k]] += e.num_occ;
+        }
+
+        #pragma omp critical
+        for (uint64_t c = 0; c < counts.size(); c++) freq[c] += counts[c];
+    }
+
+    freq[dollar] = 0;
+    return freq;
+}
+
+/**
+ * @brief renames the symbols of T in the words of the parsing (the dollars keep their value)
+ * @param table the word table
+ * @param map [0..255] map[c] = the new name of the symbol c (at least min_symbol)
+ * @param max_symbol (output) the largest symbol of the renamed words
+ * @param p number of threads
+ */
+template <typename sym_t>
+void rename_symbols(word_table<sym_t>& table, const std::array<uint8_t, 256>& map, uint64_t& max_symbol, uint16_t p)
+{
+    const uint64_t D = table.size();
+    uint64_t min_renamed = std::numeric_limits<uint64_t>::max();
+    uint64_t max_renamed = 0;
+
+    #pragma omp parallel for num_threads(p) reduction(min : min_renamed) reduction(max : max_renamed)
+    for (uint64_t s = 0; s < D; s++) {
+        const word_entry<sym_t>& e = table.entry(s);
+        sym_t* word = const_cast<sym_t*>(e.str); // the words lie in the arenas of the parsing
+
+        for (uint64_t k = 0; k < e.len; k++) {
+            if (word[k] == dollar) continue;
+            word[k] = sym_t(map[word[k]]);
+            min_renamed = std::min<uint64_t>(min_renamed, word[k]);
+            max_renamed = std::max<uint64_t>(max_renamed, word[k]);
+        }
+    }
+
+    if (min_renamed < min_symbol) throw std::invalid_argument("pfp_rlbwt: a symbol is renamed to one < min_symbol");
+    max_symbol = max_renamed;
+}
+
+/**
  * @brief computes the prefix-free parsing of S = $ T $^w and its dictionary
- * @param text the text T
+ * @param text the text T in prm.num_threads ranges (see text_ranges::split); if text_ranges::ranges_read returns a
+ *        map, the symbols of T are renamed by it in the words before they are sorted
  * @param prm parameters
  * @param seed the seed of the trigger strings (see rolling_window_hash)
+ * @param parsed if not nullptr, called with the sizes of the parsing (see result) once the text is not read any more,
+ *        before the dictionary is built; if it returns false, the parsing is returned without its dictionary
  * @return the parsing
  */
 template <typename sym_t>
-parsing<sym_t> parse(const text_source<sym_t>& text, const params& prm, uint64_t seed)
+parsing<sym_t> parse(text_ranges<sym_t>& text, const params& prm, uint64_t seed,
+    const std::function<bool(const result&)>* parsed = nullptr)
 {
     const uint16_t p = prm.num_threads;
-    const uint64_t n = text.size();
     parsing<sym_t> prs;
-    prs.n = n;
     prs.w = prm.window;
     prs.position_bytes = prm.position_bytes;
     prs.phrases_of_thread.resize(p);
     word_table<sym_t> table(p);
     std::vector<word_arena> arenas(p);
     std::vector<uint64_t> max_sym(p, 0);
+    std::vector<uint64_t> range_len(p, 0); // [0..p-1] the number of symbols of range i
 
-    // part i parses the phrases starting in [1 + i*n/p, 1 + (i+1)*n/p) and part 0 also the one starting at 0
+    phase_progress prog(prm.log, text.max_size());
+    const uint64_t block_len = block_symbols<sym_t>(); // evaluated in this thread (see current_level)
+
+    // part i parses the phrases starting in range i and part 0 also the one starting at 0
     run_on_threads(p, [&](uint64_t t, uint64_t team_size) {
         for (uint64_t i = t; i < p; i += team_size) {
-            max_sym[i] = parse_phrases_in_range(text, 1 + (i * n) / p, 1 + ((i + 1) * n) / p, i == 0, prm, seed,
-                table, arenas[i], prs.phrases_of_thread[i]);
+            std::unique_ptr<typename text_ranges<sym_t>::reader> in = text.open(i, &prog);
+            max_sym[i] = parse_phrases_in_range<sym_t>(*in, i == 0, prm, seed, table, arenas[i],
+                prs.phrases_of_thread[i], block_len);
+            range_len[i] = in->range_length();
         }
     });
 
+    prog.finish();
+    prs.n = std::accumulate(range_len.begin(), range_len.end(), uint64_t { 0 });
+    const uint64_t n = prs.n;
     for (uint16_t i = 0; i < p; i++) prs.max_symbol = std::max(prs.max_symbol, max_sym[i]);
+
+    std::array<uint64_t, 256> freq {}; // the frequencies of the symbols of T, if text_ranges needs them
+    bool counted = false;
+
+    if constexpr (sizeof(sym_t) == 1) {
+        if (text.needs_frequencies()) {
+            freq = count_symbols(table, prm.window, p);
+            counted = true;
+        }
+    }
+
+    if (const std::array<uint8_t, 256>* map = text.ranges_read(counted ? &freq : nullptr); map != nullptr) {
+        if constexpr (sizeof(sym_t) == 1) rename_symbols(table, *map, prs.max_symbol, p);
+        else throw std::invalid_argument("pfp_rlbwt: only symbols of one byte can be renamed");
+    }
+
     prs.continues.assign(p, 0);
     uint64_t next_first = word_table<sym_t>::max_words; // the word id of the first phrase run of the next thread
 
     for (uint64_t i = p; i-- > 0;) {
-        thread_phrases<sym_t>& b = prs.phrases_of_thread[i];
-        if (b.word_ids.size() == 0) continue;
-        prs.continues[i] = b.word_ids.back() == next_first;
-        if (prs.continues[i]) b.repeated_ids.push_back(b.word_ids.back());
-        next_first = b.word_ids.front();
+        thread_phrases& runs = prs.phrases_of_thread[i];
+        if (runs.num_runs == 0) continue;
+        prs.continues[i] = runs.word_ids.back() == next_first;
+        if (prs.continues[i]) runs.repeated_ids.push_back(runs.word_ids.back());
+        next_first = runs.word_ids.front();
     }
 
-    for (uint64_t i = 0; i < p; i++) prs.num_phrase_runs += prs.phrases_of_thread[i].word_ids.size() - prs.continues[i];
+    for (uint64_t i = 0; i < p; i++) {
+        thread_phrases& runs = prs.phrases_of_thread[i];
+        prs.num_phrase_runs += runs.num_runs - prs.continues[i];
+        if (runs.num_runs % std::numeric_limits<uint64_t>::digits != 0) runs.multi_runs.push_back(runs.multi_bits);
+        runs.word_ids.shrink_to_fit();
+        runs.multi_runs.shrink_to_fit();
+        runs.copies.shrink_to_fit();
+    }
 
-    // sort the words
     dictionary<sym_t>& dict = prs.dict;
     const uint64_t D = table.size();
     dict.num_words = D;
+    dict.size = 0;
+
+    for (uint64_t s = 0; s < D; s++) {
+        dict.size += table.entry(s).len + 1;
+        prs.num_phrases += table.entry(s).num_occ;
+    }
+
+    if (parsed != nullptr) {
+        result sizes;
+        sizes.n_with_terminator = n + 1;
+        sizes.num_phrases = prs.num_phrases;
+        sizes.num_phrase_runs = prs.num_phrase_runs;
+        sizes.num_words = D;
+        sizes.dictionary_size = dict.size;
+        if (!(*parsed)(sizes)) return prs;
+    }
+
+    // sort the words
     malloc_array_t<uint32_t> order = new_malloc_array<uint32_t>(D);
 
     #pragma omp parallel for num_threads(p)
@@ -677,12 +1044,6 @@ parsing<sym_t> parse(const text_source<sym_t>& text, const params& prm, uint64_t
 
     // store the words in lexicographic order
     prs.word_rank = new_malloc_array<uint32_t>(D);
-    dict.size = 0;
-    for (uint64_t s = 0; s < D; s++) {
-        dict.size += table.entry(s).len + 1;
-        prs.num_phrases += table.entry(s).num_occ;
-    }
-
     dict.word_start = uint_array(D + 1, value_bytes(dict.size));
     dict.num_occ = uint_array(D, value_bytes(prs.num_phrases));
     uint64_t pos = 0;
@@ -705,9 +1066,9 @@ parsing<sym_t> parse(const text_source<sym_t>& text, const params& prm, uint64_t
         prs.word_rank[order[s]] = uint32_t(s);
     }
 
-    for (thread_phrases<sym_t>& b : prs.phrases_of_thread) {
-        for (uint32_t id : b.repeated_ids) prs.repeated_words.push_back(prs.word_rank[id]);
-        b.repeated_ids = std::vector<uint32_t>();
+    for (thread_phrases& runs : prs.phrases_of_thread) {
+        for (uint32_t id : runs.repeated_ids) prs.repeated_words.push_back(prs.word_rank[id]);
+        runs.repeated_ids = std::vector<uint32_t>();
     }
 
     std::sort(prs.repeated_words.begin(), prs.repeated_words.end());
@@ -718,180 +1079,283 @@ parsing<sym_t> parse(const text_source<sym_t>& text, const params& prm, uint64_t
 }
 
 /**
- * @brief writes the ends of the phrase runs and the symbols before their next phrases to files, copies the phrase runs
- *        into the parse of the phrase runs, assigns their letters and frees the phrases of prs
- * @param prs the parsing
- * @param prefix path prefix of the files (see ext_phrase_run_ends and ext_phrase_run_symbols)
+ * @brief stores the letters of the phrase runs in P, the parse of the phrase runs, and frees the word ids of the phrase
+ *        runs (see phrase_arrays::free_word_ids)
+ * @param arr the phrase runs
+ * @param J number of phrase runs
  * @param threads number of threads
+ */
+template <typename idx_t, typename sym_t>
+void store_parse(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uint16_t threads)
+{
+    // P[i] = 1 + the letter of phrase run i
+    arr.P = new_malloc_array<idx_t>(J + 1);
+    arr.P[J] = 0;
+
+    for (uint64_t u = 0; u + 1 < arr.run_offsets.size(); u++) {
+        const uint64_t first = arr.run_offsets[u], size = arr.run_offsets[u + 1] - first;
+
+        arr.runs_of_part[u].word_ids.move_to([&](uint64_t j, uint32_t id) {
+            if (j < size) arr.P[first + j] = idx_t(1 + arr.letter_of(first + j, id));
+        }, threads);
+    }
+
+    arr.free_word_ids();
+}
+
+/**
+ * @brief writes the ends of the phrase runs to a file (see phrase_arrays::ends_file) and assigns the letters of the
+ *        phrase runs; without recursion, stores the letters in P and frees the word ids of the phrase runs, else keeps
+ *        the word ids, from which the next level reads the letters (see letter_source)
+ * @param prs the parsing
+ * @param prefix path prefix of the file (see ext_phrase_run_ends)
+ * @param threads number of threads
+ * @param recursive true <=> P is suffix-sorted recursively (see sort_parse_recursively); then P is not built
  * @return the arrays
  */
 template <typename idx_t, typename sym_t>
-phrase_arrays<idx_t, sym_t> build_phrase_arrays(parsing<sym_t>& prs, const std::string& prefix, uint16_t threads)
+phrase_arrays<idx_t, sym_t> build_phrase_arrays(parsing<sym_t>& prs, const std::string& prefix, uint16_t threads,
+    bool recursive)
 {
     const uint64_t J = prs.num_phrase_runs;
     const uint64_t w = prs.w;
     const dictionary<sym_t>& dict = prs.dict;
     const uint64_t D = dict.num_words;
     const uint8_t bytes = prs.position_bytes;
+    const uint64_t parts = prs.phrases_of_thread.size();
+    const std::vector<uint64_t>& repeated = prs.repeated_words;
+    const uint64_t R = repeated.size();
+    constexpr uint64_t word_bits = std::numeric_limits<uint64_t>::digits;
     phrase_arrays<idx_t, sym_t> arr;
     arr.position_bytes = bytes;
+    if (R != 0) arr.repeated_set = ranked_bits([&](uint64_t y) { return repeated[y]; }, R, D);
+    const ranked_bits& is_repeated = arr.repeated_set;
+    // the number of phrase runs of part u
+    auto runs_of = [&](uint64_t u) { return prs.phrases_of_thread[u].num_runs; };
+    // the symbol before the last w symbols of the word with id `id`
+    auto symbol = [&](uint64_t id) {
+        const uint64_t s = prs.word_rank[id];
+        return dict.text[dict.word_start[s] + dict.length(s) - w - 1];
+    };
 
-    // the ends and the symbols are written before P is allocated
-    {
-        arr.ends_file = temporary_file(prefix + ext_phrase_run_ends);
-        arr.symbols_file = temporary_file(prefix + ext_phrase_run_symbols);
-        parallel_output_file ends_out(arr.ends_file.path());
-        parallel_output_file symbols_out(arr.symbols_file.path());
-        const uint64_t parts = prs.phrases_of_thread.size();
-        /* the values of each part are stored after those of the part before: [0..parts] offsets[t] = number of runs
-           the parts before part t store; the last value of a part whose last phrase run continues in the next part
-           is not stored (that part stores the run) */
-        std::vector<uint64_t> offsets(parts + 1, 0);
+    /* per word id: [0..D-1] id_advance[id] = the advance of the word; bit id % 64 of id_repeated[id / 64] = 1 <=> the
+       word is repeated */
+    uint64_t max_advance = 0;
+    for (uint64_t s = 0; s < D; s++) max_advance = std::max(max_advance, dict.length(s) - w);
+    uint_array id_advance(D, value_bytes(max_advance));
+    std::vector<uint64_t> id_repeated(D / word_bits + 1, 0);
 
-        for (uint64_t t = 0; t < parts; t++) {
-            const thread_phrases<sym_t>& b = prs.phrases_of_thread[t];
-            offsets[t + 1] = offsets[t] + b.word_ids.size() - prs.continues[t];
-            if (b.word_ids.size() != 0) arr.last_symbol = b.symbol_before_next.back();
+    #pragma omp parallel for num_threads(threads)
+    for (uint64_t b = 0; b < id_repeated.size(); b++) {
+        for (uint64_t id = word_bits * b; id < std::min(D, word_bits * (b + 1)); id++) {
+            const uint64_t s = prs.word_rank[id];
+            id_advance.set(id, dict.length(s) - w);
+            if (R != 0 && is_repeated.contains(s)) id_repeated[b] |= uint64_t { 1 } << (id % word_bits);
         }
+    }
+
+    auto advance = [&](uint64_t id) { return id_advance[id]; };
+
+    /* the phrase runs of each part are stored after those of the part before: [0..parts] offsets[u] = number of runs
+       the parts before part u store; the last run of a part whose last phrase run continues in the next part with
+       phrase runs is not stored: that part stores the run as its first one */
+    std::vector<uint64_t> offsets(parts + 1, 0);
+    for (uint64_t u = 0; u < parts; u++) offsets[u + 1] = offsets[u] + runs_of(u) - prs.continues[u];
+    /* [0..parts] length_before[u] = the total length of the phrase runs of the parts before part u; [0..parts-1]
+       last_copies[u] = the number of phrases of the last phrase run of part u */
+    std::vector<uint64_t> length_before(parts + 1, 0), last_copies(parts, 0);
+
+    for (uint64_t u = 0; u < parts; u++) {
+        length_before[u + 1] = prs.phrases_of_thread[u].length;
+        last_copies[u] = prs.phrases_of_thread[u].last_copies;
+    }
+
+    for (uint64_t u = 0; u < parts; u++) length_before[u + 1] += length_before[u];
+
+    /* [0..parts-1] carry[u] = the number of phrases of the parts before part u in the phrase run that part u stores as
+       its first one; next_rank[u] = the rank of the word of the first phrase run after part u (no_rank: none) */
+    constexpr uint64_t no_rank = std::numeric_limits<uint64_t>::max();
+    std::vector<uint64_t> carry(parts, 0), next_rank(parts, no_rank);
+
+    for (uint64_t u = 0, c = 0; u < parts; u++) {
+        if (runs_of(u) == 0) continue;
+        carry[u] = c;
+        c = prs.continues[u] ? last_copies[u] + (runs_of(u) == 1 ? c : 0) : 0;
+    }
+
+    for (uint64_t u = parts, after = no_rank; u-- > 0;) {
+        next_rank[u] = after;
+        if (runs_of(u) != 0) after = prs.word_rank[prs.phrases_of_thread[u].word_ids.front()];
+    }
+
+    for (uint64_t u = 0; u < parts; u++) {
+        if (runs_of(u) != 0) arr.last_symbol = symbol(prs.phrases_of_thread[u].word_ids.back());
+    }
+
+    /* the ends are written before P is allocated: the end of a run is the end of the run before it plus its number of
+       phrases times the advance of its word; the phrase runs of the repeated words are collected per part as (i, index
+       in repeated, key), and the extra phrases of the repeated words per part */
+    std::vector<std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>> repeated_runs(parts);
+    std::vector<std::vector<uint64_t>> extra_of_part(parts, std::vector<uint64_t>(R, 0));
+
+    {
+        arr.ends_file = temporary_array(prefix + ext_phrase_run_ends, temporary_arrays_in_memory());
+        const std::unique_ptr<positioned_output> ends_out = arr.ends_file.output(J * bytes);
 
         run_on_threads(threads, [&](uint64_t t, uint64_t team_size) {
+            // the ends of a part are collected in buffers of about run_buffer_bytes bytes
+            const uint64_t buffer_runs = std::max<uint64_t>(1, run_buffer_bytes / bytes);
+            std::vector<uint8_t> ends(buffer_runs * bytes + sizeof(uint64_t));
+
             for (uint64_t u = t; u < parts; u += team_size) {
-                thread_phrases<sym_t>& b = prs.phrases_of_thread[u];
+                thread_phrases& runs = prs.phrases_of_thread[u];
+                word_id_vector::reader ids(runs.word_ids);
+                block_vector<uint64_t>::reader multi_runs(runs.multi_runs);
+                uint64_t multi_bits = 0; // the bits of multi_runs of the next run and the runs after it in its word
+                block_vector<uint8_t>::reader copies(runs.copies);
                 const uint64_t size = offsets[u + 1] - offsets[u];
+                uint64_t end = w - 1 + length_before[u];
+                uint64_t id = size == 0 ? 0 : ids.next(); // the id of the next run
 
-                b.symbol_before_next.move_blocks([&](uint64_t o, const sym_t* values, uint64_t num) {
-                    num = std::min(num, size - std::min(size, o));
-                    if (num != 0) symbols_out.write(values, num * sizeof(sym_t), (offsets[u] + o) * sizeof(sym_t));
-                }, 1);
+                for (uint64_t first = 0; first < size; first += buffer_runs) {
+                    const uint64_t num = std::min(buffer_runs, size - first);
 
-                // o and num count bytes
-                b.ends.move_blocks([&](uint64_t o, const uint8_t* values, uint64_t num) {
-                    num = std::min(num, size * bytes - std::min(size * bytes, o));
-                    if (num != 0) ends_out.write(values, num, offsets[u] * bytes + o);
-                }, 1);
+                    for (uint64_t j = 0; j < num; j++) {
+                        const uint64_t i = first + j; // the index of the run in the part
+                        if (i % word_bits == 0) multi_bits = multi_runs.next();
+                        const uint64_t m = (multi_bits >> (i % word_bits)) & 1 ? read_varint(copies) : 1;
+                        end += m * advance(id);
+                        std::memcpy(ends.data() + j * bytes, &end, bytes);
+                        const uint64_t next_id = i + 1 < runs_of(u) ? ids.next() : 0;
+
+                        if ((id_repeated[id / word_bits] >> (id % word_bits)) & 1) [[unlikely]] {
+                            // the run with all its phrases (also those of the parts before), and the word after it
+                            const uint64_t s = prs.word_rank[id];
+                            const uint64_t all = m + (i == 0 ? carry[u] : 0);
+                            const uint64_t after = i + 1 < runs_of(u) ? prs.word_rank[next_id] : next_rank[u];
+                            const uint64_t y = is_repeated.rank(s);
+                            const bool down = after == no_rank || after < s;
+                            repeated_runs[u].emplace_back(offsets[u] + i, y, run_key(down, all));
+                            extra_of_part[u][y] += all - 1;
+                        }
+
+                        id = next_id;
+                    }
+
+                    ends_out->write(ends.data(), num * bytes, (offsets[u] + first) * bytes);
+                }
+
+                runs.multi_runs = block_vector<uint64_t>();
+                runs.copies = block_vector<uint8_t>();
             }
         });
 
-        ends_out.close();
-        symbols_out.close();
+        ends_out->close();
     }
 
-    arr.P = new_malloc_array<idx_t>(J + 1);
-    arr.P[J] = 0;
-    // without repeated words, the letter of a run is the rank of its word
-    const uint64_t letter_offset = prs.repeated_words.empty() ? 1 : 0;
-    /* the values of each thread are stored after those of the thread before; the last value of a thread whose last
-       phrase run continues in the next thread is overwritten by the first value of that thread */
-    uint64_t offset = 0;
+    // the letters of the repeated words: one per distinct key of their phrase runs
+    if (R != 0) {
+        std::vector<std::vector<uint64_t>> keys(R);
 
-    for (uint64_t t = 0; t < prs.phrases_of_thread.size(); t++) {
-        thread_phrases<sym_t>& b = prs.phrases_of_thread[t];
-        const uint64_t size = b.word_ids.size();
-        b.word_ids.move_to(arr.P.get() + offset, [&](uint32_t id) { return idx_t(letter_offset + prs.word_rank[id]); },
-            threads);
-        offset += size - prs.continues[t];
-    }
-
-    prs.word_rank.reset();
-    prs.phrases_of_thread.clear();
-    const std::vector<uint64_t>& repeated = prs.repeated_words;
-    const uint64_t R = repeated.size();
-
-    if (R == 0) {
-        arr.num_letters = D;
-        return arr;
-    }
-
-    arr.repeated_set = ranked_bits([&](uint64_t y) { return repeated[y]; }, R, D);
-    const ranked_bits& is_repeated = arr.repeated_set;
-
-    // returns the number of phrases of run i, whose word is s, with a reader of ends_file
-    auto copies = [&](array_file_reader& ends, uint64_t i, uint64_t s) {
-        const uint64_t before = i == 0 ? w - 1 : ends[i - 1];
-        return (ends[i] - before) / (dict.length(s) - w);
-    };
-
-    /* the distinct keys of the phrase runs of the repeated words, (index in repeated, key), and the extra phrases of
-       the repeated words, per thread */
-    std::vector<std::vector<std::pair<uint64_t, uint64_t>>> keys_of_thread(threads);
-    std::vector<std::vector<uint64_t>> extra_of_thread(threads, std::vector<uint64_t>(R, 0));
-
-    // thread t of p threads processes the runs [t * J / p, (t + 1) * J / p)
-    run_on_threads(threads, [&](uint64_t t, uint64_t p) {
-        std::vector<std::pair<uint64_t, uint64_t>>& keys = keys_of_thread[t];
-        array_file_reader ends(arr.ends_file.path(), bytes);
-
-        for (uint64_t i = (t * J) / p; i < ((t + 1) * J) / p; i++) {
-            const uint64_t s = uint64_t(arr.P[i]);
-            if (!is_repeated.contains(s)) continue;
-            const uint64_t y = is_repeated.rank(s);
-            const uint64_t m = copies(ends, i, s);
-            const bool down = i + 1 == J || uint64_t(arr.P[i + 1]) < s;
-            keys.emplace_back(y, run_key(down, m));
-            extra_of_thread[t][y] += m - 1;
+        for (uint64_t u = 0; u < parts; u++) {
+            for (const auto& [i, y, key] : repeated_runs[u]) keys[y].push_back(key);
         }
 
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-    });
+        arr.repeated_words.resize(R);
+        arr.letters_before.assign(R + 1, 0);
 
-    std::vector<std::pair<uint64_t, uint64_t>> keys;
+        for (uint64_t y = 0; y < R; y++) {
+            repeated_word& rw = arr.repeated_words[y];
+            std::sort(keys[y].begin(), keys[y].end());
+            keys[y].erase(std::unique(keys[y].begin(), keys[y].end()), keys[y].end());
+            rw.word = repeated[y];
+            rw.first_letter = rw.word + arr.letters_before[y];
+            rw.keys = std::move(keys[y]);
+            for (uint64_t u = 0; u < parts; u++) rw.extra_phrases += extra_of_part[u][y];
+            arr.letters_before[y + 1] = arr.letters_before[y] + rw.keys.size() - 1;
+        }
 
-    for (std::vector<std::pair<uint64_t, uint64_t>>& k : keys_of_thread) {
-        keys.insert(keys.end(), k.begin(), k.end());
-        k = std::vector<std::pair<uint64_t, uint64_t>>();
-    }
-
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-    arr.repeated_words.resize(R);
-    // [0..R] letters_before[y] = the number of letters of the words in repeated[0..y-1] minus y
-    std::vector<uint64_t> letters_before(R + 1, 0);
-
-    for (uint64_t y = 0, z = 0; y < R; y++) {
-        repeated_word& rw = arr.repeated_words[y];
-        rw.word = repeated[y];
-        rw.first_letter = rw.word + letters_before[y];
-        for (; z < keys.size() && keys[z].first == y; z++) rw.keys.push_back(keys[z].second);
-        for (uint64_t t = 0; t < threads; t++) rw.extra_phrases += extra_of_thread[t][y];
-        letters_before[y + 1] = letters_before[y] + rw.keys.size() - 1;
-    }
-
-    arr.num_letters = D + letters_before[R];
-
-    // part u replaces the words of the runs [u * J / threads, (u + 1) * J / threads) by their letters; the word after
-    // its last run is read first
-    std::vector<uint64_t> word_after(threads);
-    for (uint64_t u = 0; u < threads; u++) word_after[u] = uint64_t(arr.P[((u + 1) * J) / threads]);
-
-    run_on_threads(threads, [&](uint64_t t, uint64_t team_size) {
-        array_file_reader ends(arr.ends_file.path(), bytes);
-
-        for (uint64_t u = t; u < threads; u += team_size) {
-            const uint64_t beg = (u * J) / threads, end = ((u + 1) * J) / threads;
-
-            for (uint64_t i = beg; i < end; i++) {
-                const uint64_t s = uint64_t(arr.P[i]);
-                uint64_t letter = 0;
-
-                if (!is_repeated.contains(s)) {
-                    letter = s + letters_before[is_repeated.rank(s)];
-                } else {
-                    const repeated_word& rw = arr.repeated_words[is_repeated.rank(s)];
-                    const uint64_t after = i + 1 == end ? word_after[u] : uint64_t(arr.P[i + 1]);
-                    const bool down = i + 1 == J || after < s;
-                    const uint64_t key = run_key(down, copies(ends, i, s));
-                    letter = rw.first_letter
-                        + (std::lower_bound(rw.keys.begin(), rw.keys.end(), key) - rw.keys.begin());
-                }
-
-                arr.P[i] = idx_t(1 + letter);
+        for (uint64_t u = 0; u < parts; u++) {
+            for (const auto& [i, y, key] : repeated_runs[u]) {
+                const repeated_word& rw = arr.repeated_words[y];
+                const uint64_t index = std::lower_bound(rw.keys.begin(), rw.keys.end(), key) - rw.keys.begin();
+                arr.repeated_run_letters.emplace_back(i, rw.first_letter + index);
             }
-        }
-    });
 
+            repeated_runs[u] = std::vector<std::tuple<uint64_t, uint64_t, uint64_t>>();
+        }
+    }
+
+    arr.num_letters = D + (R == 0 ? 0 : arr.letters_before[R]);
+    id_advance = uint_array();
+
+    // the letters per word id (num_letters for the repeated words, whose phrase runs have letters of their own)
+    arr.id_letter = uint_array(D, value_bytes(arr.num_letters));
+
+    #pragma omp parallel for num_threads(threads)
+    for (uint64_t id = 0; id < D; id++) {
+        const uint64_t s = prs.word_rank[id];
+        const bool rep = R != 0 && is_repeated.contains(s);
+        arr.id_letter.set(id, rep ? arr.num_letters : R == 0 ? s : s + arr.letters_before[is_repeated.rank(s)]);
+    }
+
+    arr.runs_of_part = std::move(prs.phrases_of_thread);
+    arr.word_rank = std::move(prs.word_rank);
+    arr.run_offsets = std::move(offsets);
+    if (!recursive) store_parse(arr, J, threads);
     return arr;
 }
+
+/**
+ * @brief the text T' = (P[0] + 1) (P[1] + 1) ... (P[J-1] + 1) of the next level of the recursive prefix-free parsing
+ *        (see sort_parse_recursively), read from the word ids of the phrase runs (see phrase_arrays::runs_of_part)
+ * @tparam text_t type of a symbol of T'
+ */
+template <typename idx_t, typename sym_t, typename text_t>
+class letter_source : public text_source<text_t> {
+private:
+    // reads T' from the word ids of the phrase runs
+    class letter_reader : public text_source<text_t>::reader {
+    private:
+        const phrase_arrays<idx_t, sym_t>& arr; // the phrase runs
+
+    public:
+        explicit letter_reader(const phrase_arrays<idx_t, sym_t>& arr) : arr(arr) { }
+
+        void read(uint64_t pos, uint64_t len, text_t* dst) override
+        {
+            // the part storing phrase run pos
+            uint64_t u = std::upper_bound(arr.run_offsets.begin(), arr.run_offsets.end(), pos)
+                - arr.run_offsets.begin() - 1;
+            auto ids = std::make_unique<word_id_vector::reader>(arr.runs_of_part[u].word_ids,
+                pos - arr.run_offsets[u]);
+
+            for (uint64_t k = 0; k < len; k++) {
+                const uint64_t i = pos + k;
+
+                while (i == arr.run_offsets[u + 1]) {
+                    u++;
+                    ids = std::make_unique<word_id_vector::reader>(arr.runs_of_part[u].word_ids, 0);
+                }
+
+                dst[k] = text_t(2 + arr.letter_of(i, ids->next()));
+            }
+        }
+    };
+
+    const phrase_arrays<idx_t, sym_t>& arr; // the phrase runs
+    uint64_t J; // the number of phrase runs
+
+public:
+    letter_source(const phrase_arrays<idx_t, sym_t>& arr, uint64_t J) : arr(arr), J(J) { }
+
+    uint64_t size() const override { return J; }
+
+    std::unique_ptr<typename text_source<text_t>::reader> new_reader() const override
+    {
+        return std::make_unique<letter_reader>(arr);
+    }
+};
 
 } // namespace pfp_rlbwt
 

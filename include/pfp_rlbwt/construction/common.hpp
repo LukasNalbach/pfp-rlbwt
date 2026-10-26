@@ -48,6 +48,7 @@
 #include <omp.h>
 
 #include <misc/files.hpp>
+#include <misc/memory.hpp>
 #include <misc/platform.hpp>
 #include <misc/threads.hpp>
 
@@ -73,14 +74,24 @@ struct free_deleter {
 template <typename val_t>
 using malloc_array_t = std::unique_ptr<val_t[], free_deleter>;
 
-// returns an array of n values that are not initialized
+// returns an array of n values that are not initialized (on huge pages, see advise_huge_pages)
 template <typename val_t>
 inline malloc_array_t<val_t> new_malloc_array(uint64_t n)
 {
     static_assert(std::is_trivial_v<val_t>);
     val_t* ptr = (val_t*) std::malloc(std::max<uint64_t>(1, n) * sizeof(val_t));
     if (ptr == nullptr) throw std::bad_alloc();
+    advise_huge_pages(ptr, n * sizeof(val_t));
     return malloc_array_t<val_t>(ptr);
+}
+
+// resizes the array a (see new_malloc_array) to max(1, n) values with realloc; the values that fit are kept
+template <typename val_t>
+inline void resize_malloc_array(malloc_array_t<val_t>& a, uint64_t n)
+{
+    val_t* resized = (val_t*) std::realloc(a.release(), std::max<uint64_t>(1, n) * sizeof(val_t));
+    if (resized == nullptr) throw std::bad_alloc();
+    a.reset(resized);
 }
 
 // the fewest and the most bytes per value of a uint_array (32-bit and 48-bit values)
@@ -119,32 +130,6 @@ public:
           mask((uint64_t { 1 } << (8 * bytes)) - 1)
     { }
 
-    /**
-     * @brief stores the values of an array with as few bytes per value as hold max_value, in the memory of the array
-     * @param a the array a[0..n-1]; its memory is taken over and shrunk
-     * @param n number of values
-     * @param max_value the largest value
-     */
-    template <typename val_t>
-    static uint_array compact(malloc_array_t<val_t> a, uint64_t n, uint64_t max_value)
-    {
-        const uint8_t bytes = value_bytes(max_value);
-        uint8_t* raw = (uint8_t*) a.release();
-
-        // value i moves from offset i * sizeof(val_t) to offset i * bytes <= i * sizeof(val_t), so ascending i is safe
-        if (bytes != sizeof(val_t)) {
-            for (uint64_t i = 0; i < n; i++) {
-                val_t val;
-                std::memcpy(&val, raw + i * sizeof(val_t), sizeof(val_t));
-                std::memcpy(raw + i * bytes, &val, bytes);
-            }
-        }
-
-        uint8_t* resized = (uint8_t*) std::realloc(raw, n * bytes + sizeof(uint64_t));
-        if (resized == nullptr) throw std::bad_alloc();
-        return uint_array(malloc_array_t<uint8_t>(resized), bytes);
-    }
-
     inline uint64_t operator[](uint64_t i) const
     {
         uint64_t val;
@@ -154,6 +139,9 @@ public:
 
     inline void set(uint64_t i, uint64_t val) { std::memcpy(data.get() + i * bytes, &val, bytes); }
 
+    // fetches the cache line of value i into the cache
+    inline void prefetch(uint64_t i) const { __builtin_prefetch(data.get() + i * bytes); }
+
     // returns the number of bytes per value
     uint8_t width() const { return bytes; }
 
@@ -161,34 +149,8 @@ public:
     uint8_t* raw() { return data.get(); }
 };
 
-/**
- * @brief an array of indices computed by libsais: int32_t values as they are, wider values with as few bytes each
- *        as hold the largest (see uint_array)
- */
-template <typename idx_t>
-class index_array {
-private:
-    /* the values: [0..n-1]; for int32_t the array computed by libsais, else that array compacted to the fewest bytes
-       per value that hold the largest (see uint_array::compact) */
-    std::conditional_t<sizeof(idx_t) == sizeof(int32_t), malloc_array_t<idx_t>, uint_array> values;
-
-public:
-    index_array() = default;
-
-    /**
-     * @brief takes an array computed by libsais
-     * @param a the array a[0..n-1]
-     * @param n number of values
-     * @param max_value the largest value
-     */
-    index_array(malloc_array_t<idx_t> a, uint64_t n, uint64_t max_value)
-    {
-        if constexpr (sizeof(idx_t) == sizeof(int32_t)) values = std::move(a);
-        else values = uint_array::compact(std::move(a), n, max_value);
-    }
-
-    inline uint64_t operator[](uint64_t i) const { return uint64_t(values[i]); }
-};
+// number of bytes of the largest blocks of a block_vector
+constexpr uint64_t max_block_bytes = uint64_t { 1 } << 18;
 
 /**
  * @brief a sequence of values stored in blocks that are never moved; move_to copies the values into one array and
@@ -199,7 +161,36 @@ template <typename val_t>
 class block_vector {
 public:
     static constexpr uint64_t min_block_size = uint64_t { 1 } << 12; // values in the first block
-    static constexpr uint64_t max_block_size = uint64_t { 1 } << 20; // values in the largest blocks
+    // values in the largest blocks (max_block_bytes bytes)
+    static constexpr uint64_t max_block_size = std::max<uint64_t>(min_block_size, max_block_bytes / sizeof(val_t));
+
+    // reads the values in order without freeing them
+    class reader {
+    private:
+        const block_vector& v;
+        uint64_t b = 0; // the block of the next value
+        uint64_t i = 0; // the index of the next value in its block
+
+    public:
+        // reads from value first on
+        explicit reader(const block_vector& v, uint64_t first = 0) : v(v)
+        {
+            while (b < v.sizes.size() && first >= v.sizes[b]) first -= v.sizes[b++];
+            if (b == v.sizes.size() && b != 0) i = v.sizes[--b]; // first = size(): at the end of the last block
+            else i = first;
+        }
+
+        // returns the next value (there has to be one)
+        inline val_t next()
+        {
+            if (i == v.sizes[b]) {
+                b++;
+                i = 0;
+            }
+
+            return v.blocks[b][i++];
+        }
+    };
 
 private:
     /* the blocks: [0..blocks.size()-1] blocks[b] stores the values [o_b..o_b + sizes[b] - 1] of the sequence, where
@@ -229,6 +220,14 @@ public:
         uint64_t s = 0;
         for (uint64_t b : sizes) s += b;
         return s;
+    }
+
+    // frees the unused part of the last block
+    void shrink_to_fit()
+    {
+        if (blocks.empty() || fill == capacity) return;
+        resize_malloc_array(blocks.back(), fill);
+        capacity = fill;
     }
 
     // returns the first value (the sequence must not be empty)
@@ -299,137 +298,83 @@ public:
 constexpr uint64_t write_buffer_bytes = uint64_t { 1 } << 20;
 
 /**
- * @brief a file that several threads write to at given offsets, in any order, with O_DIRECT (if the file system does
- *        not support it, through the page cache). The sectors of a write are written directly; the bytes of a sector
- *        that the write covers only partly are collected until the sector is complete. close writes the remaining
- *        sectors padded with zeros and truncates the file to its length.
+ * @brief writes values given with a fixed number of bytes each (little endian) into a uint_array: the value written at
+ *        the byte offset o is stored at index o / value_bytes
  */
-class parallel_output_file {
+class array_output : public positioned_output {
 private:
-    static constexpr uint64_t sector = direct_io_alignment;
-
-    // a sector that has been written only partly
-    struct partial_sector {
-        uint8_t* bytes; // the sector (aligned to sector), zero where it has not been written
-        uint64_t written; // the number of bytes written
-    };
-
-    std::string path; // path of the file
-    int fd = -1; // file descriptor
-    bool direct = false; // true <=> the file is opened with O_DIRECT
-    uint64_t length = 0; // the length of the file: the largest offset after a written byte
-    std::mutex lock; // protects partial and length
-    std::vector<std::pair<uint64_t, partial_sector>> partial; // the partly written sectors with their indexes
-
-    // writes size bytes from an aligned buffer at an aligned offset
-    void write_aligned(const uint8_t* data, uint64_t size, uint64_t offset)
-    {
-        if (!pwrite_fully(fd, (const char*) data, size, offset))
-            throw std::runtime_error("pfp_rlbwt: cannot write " + path);
-    }
-
-    // adds the bytes data[0..end-beg-1] at the offsets [beg, end) to the partly written sectors; writes complete ones
-    void write_partial(const uint8_t* data, uint64_t beg, uint64_t end)
-    {
-        std::lock_guard<std::mutex> guard(lock);
-
-        while (beg < end) {
-            const uint64_t index = beg / sector;
-            const uint64_t num = std::min(end, (index + 1) * sector) - beg;
-            auto it = std::find_if(partial.begin(), partial.end(), [&](const auto& e) { return e.first == index; });
-
-            if (it == partial.end()) {
-                uint8_t* bytes = (uint8_t*) allocate_aligned(sector);
-                std::memset(bytes, 0, sector);
-                partial.emplace_back(index, partial_sector { bytes, 0 });
-                it = partial.end() - 1;
-            }
-
-            std::memcpy(it->second.bytes + (beg - index * sector), data, num);
-            it->second.written += num;
-
-            if (it->second.written == sector) {
-                write_aligned(it->second.bytes, sector, index * sector);
-                platform::free_aligned(it->second.bytes);
-                partial.erase(it);
-            }
-
-            data += num;
-            beg += num;
-        }
-    }
+    uint_array& values; // the destination
+    uint8_t value_bytes; // bytes per written value
 
 public:
-    // creates (or truncates) the file
-    explicit parallel_output_file(const std::string& path) : path(path)
-    {
-        fd = open_direct_or_buffered(path, platform::file_access::write, direct);
-        if (fd < 0) throw std::runtime_error("pfp_rlbwt: cannot write " + path);
-        platform::make_sparse(fd);
-    }
+    array_output(uint_array& values, uint8_t value_bytes) : values(values), value_bytes(value_bytes) { }
 
-    ~parallel_output_file()
-    {
-        for (auto& [index, s] : partial) platform::free_aligned(s.bytes);
-        if (fd >= 0) platform::close(fd);
-    }
-
-    parallel_output_file(const parallel_output_file&) = delete;
-    parallel_output_file& operator=(const parallel_output_file&) = delete;
-
-    /**
-     * @brief writes bytes to the file
-     * @param data the bytes
-     * @param size number of bytes (> 0)
-     * @param offset offset in the file
-     */
-    void write(const void* data, uint64_t size, uint64_t offset)
+    void write(const void* data, uint64_t size, uint64_t offset) override
     {
         const uint8_t* bytes = (const uint8_t*) data;
-        const uint64_t end = offset + size;
+        const uint64_t first = offset / value_bytes;
 
-        {
-            std::lock_guard<std::mutex> guard(lock);
-            length = std::max(length, end);
-        }
-
-        if (!direct) {
-            write_aligned(bytes, size, offset);
-            return;
-        }
-
-        // [first, last) are the sectors the write covers completely
-        const uint64_t first = std::min(end, div_ceil(offset, sector) * sector);
-        const uint64_t last = std::max(first, (end / sector) * sector);
-        if (offset < first) write_partial(bytes, offset, first);
-        if (last < end) write_partial(bytes + (last - offset), last, end);
-        if (first == last) return;
-
-        // the complete sectors are copied to an aligned buffer of each thread
-        static thread_local std::unique_ptr<uint8_t, decltype(&platform::free_aligned)> buffer(
-            (uint8_t*) allocate_aligned(write_buffer_bytes), &platform::free_aligned);
-
-        for (uint64_t pos = first; pos < last; pos += write_buffer_bytes) {
-            const uint64_t num = std::min(write_buffer_bytes, last - pos);
-            std::memcpy(buffer.get(), bytes + (pos - offset), num);
-            write_aligned(buffer.get(), num, pos);
+        for (uint64_t i = 0; i < size / value_bytes; i++) {
+            uint64_t val = 0;
+            std::memcpy(&val, bytes + i * value_bytes, value_bytes);
+            values.set(first + i, val);
         }
     }
 
-    // writes the partly written sectors and truncates the file to its length
-    void close()
-    {
-        for (auto& [index, s] : partial) {
-            write_aligned(s.bytes, sector, index * sector);
-            platform::free_aligned(s.bytes);
-        }
-
-        partial.clear();
-        if (!platform::set_size(fd, length)) throw std::runtime_error("pfp_rlbwt: cannot write " + path);
-        platform::close(fd);
-        fd = -1;
-    }
+    void close() override { }
 };
+
+/**
+ * @brief writes the values given with a fixed number of bytes each (little endian) at the positions of given ranges
+ *        into a uint_array: the values of the positions [beg, end) of a range follow those of the ranges before it;
+ *        the values at other positions are skipped
+ */
+class ranges_output : public positioned_output {
+private:
+    uint_array& values; // the destination
+    uint8_t value_bytes; // bytes per written value
+    std::vector<std::pair<uint64_t, uint64_t>> ranges; // the ranges [beg, end), sorted and disjoint
+    std::vector<uint64_t> offsets; // [0..ranges.size()-1] offsets[i] = the number of positions of the ranges before i
+
+public:
+    ranges_output(uint_array& values, uint8_t value_bytes, std::vector<std::pair<uint64_t, uint64_t>> ranges)
+        : values(values), value_bytes(value_bytes), ranges(std::move(ranges)), offsets(this->ranges.size(), 0)
+    {
+        for (uint64_t i = 1; i < this->ranges.size(); i++) {
+            offsets[i] = offsets[i - 1] + this->ranges[i - 1].second - this->ranges[i - 1].first;
+        }
+    }
+
+    void write(const void* data, uint64_t size, uint64_t offset) override
+    {
+        const uint8_t* bytes = (const uint8_t*) data;
+        const uint64_t first = offset / value_bytes, last = first + size / value_bytes;
+        // the first range that ends after first
+        uint64_t i = std::upper_bound(ranges.begin(), ranges.end(), first,
+            [](uint64_t pos, const std::pair<uint64_t, uint64_t>& r) { return pos < r.second; }) - ranges.begin();
+
+        for (; i < ranges.size() && ranges[i].first < last; i++) {
+            for (uint64_t pos = std::max(first, ranges[i].first); pos < std::min(last, ranges[i].second); pos++) {
+                uint64_t val = 0;
+                std::memcpy(&val, bytes + (pos - first) * value_bytes, value_bytes);
+                values.set(offsets[i] + pos - ranges[i].first, val);
+            }
+        }
+    }
+
+    void close() override { }
+};
+
+/* the level of the recursive prefix-free parsing that the calling thread computes (1: the text, k >= 2: the parse of
+   level k - 1, see build_level); it selects the names in the log (see level_name), the number of symbols read at once
+   and where the temporary arrays are kept. It is 1 in the threads that a construction starts (read it before). */
+inline thread_local uint64_t current_level = 1;
+
+// returns the name of a structure of the current level in the log: name on level 1, name_k on level k >= 2
+inline std::string level_name(const std::string& name)
+{
+    return current_level == 1 ? name : name + "_" + std::to_string(current_level);
+}
 
 // the path of a temporary file, which is removed when the object is destroyed
 class temporary_file {
@@ -485,83 +430,135 @@ inline temporary_file write_temporary_file(const std::string& path, const void* 
     return file;
 }
 
-/**
- * @brief reads the values of an array stored in a file (a fixed number of bytes per value, little endian), with
- *        O_DIRECT (if the file system does not support it, through the page cache, whose read pages are dropped); a
- *        value that is not in the buffer is read together with the values after it, read_bytes bytes at once
- */
-class array_file_reader {
-private:
-    static constexpr uint64_t sector = direct_io_alignment;
+// number of bytes a reader of a temporary file reads at once (see array_file_reader)
+constexpr uint64_t temporary_read_bytes = uint64_t { 1 } << 20;
 
+// writes bytes at given offsets into an array in RAM (several threads, in any order)
+class memory_output : public positioned_output {
+private:
+    uint8_t* bytes; // the destination
+
+public:
+    explicit memory_output(uint8_t* bytes) : bytes(bytes) { }
+    void write(const void* data, uint64_t size, uint64_t offset) override { std::memcpy(bytes + offset, data, size); }
+    void close() override { }
+};
+
+// returns whether the arrays the construction keeps temporarily are kept in RAM instead of in files (see current_level)
+inline bool temporary_arrays_in_memory() { return current_level >= 2; }
+
+/**
+ * @brief an array that the construction keeps temporarily: in a file (see temporary_file) or, on the levels after the
+ *        first of the recursive prefix-free parsing, whose arrays are small, in RAM (followed by sizeof(uint64_t)
+ *        bytes, as a uint_array)
+ */
+class temporary_array {
+private:
+    std::string file_path; // path of the file (empty if the array is stored in RAM)
+    temporary_file file; // the file, once it is written (removed with the array)
+    malloc_array_t<uint8_t> memory; // the bytes, if the array is stored in RAM
+
+public:
+    temporary_array() = default;
+
+    /**
+     * @brief an empty array; exactly one of output, write and store fills it
+     * @param path path of its file (not created if the array is kept in RAM)
+     * @param in_memory true <=> the array is kept in RAM
+     */
+    temporary_array(const std::string& path, bool in_memory) : file_path(in_memory ? std::string() : path) { }
+
+    // returns whether the array is stored in RAM
+    bool is_in_memory() const { return file_path.empty(); }
+
+    // returns the path of the file (empty if the array is stored in RAM)
+    const std::string& path() const { return file_path; }
+
+    // returns the bytes of the array (only if it is stored in RAM)
+    const uint8_t* data() const { return memory.get(); }
+
+    // returns a destination of size bytes that several threads write to; it has to be closed before the array is read
+    std::unique_ptr<positioned_output> output(uint64_t size)
+    {
+        if (is_in_memory()) {
+            memory = new_malloc_array<uint8_t>(size + sizeof(uint64_t));
+            return std::make_unique<memory_output>(memory.get());
+        }
+
+        file = temporary_file(file_path);
+        return std::make_unique<parallel_output_file>(file_path);
+    }
+
+    // stores a copy of the bytes data[0..size-1]
+    void write(const void* data, uint64_t size)
+    {
+        if (is_in_memory()) {
+            memory = new_malloc_array<uint8_t>(size + sizeof(uint64_t));
+            std::memcpy(memory.get(), data, size);
+        } else {
+            file = write_temporary_file(file_path, data, size);
+        }
+    }
+
+    /**
+     * @brief stores the values of an array allocated with malloc and frees it (in RAM, its memory is taken over)
+     * @param a the array a[0..n-1]
+     * @param n number of values
+     */
+    template <typename val_t>
+    void store(malloc_array_t<val_t> a, uint64_t n)
+    {
+        const uint64_t size = n * sizeof(val_t);
+
+        if (!is_in_memory()) {
+            file = write_temporary_file(file_path, a.get(), size);
+            return;
+        }
+
+        memory.reset((uint8_t*) a.release());
+        resize_malloc_array(memory, size + sizeof(uint64_t));
+    }
+
+    // returns the bytes of an array stored in RAM, followed by sizeof(uint64_t) bytes, and empties the array
+    malloc_array_t<uint8_t> release() { return std::move(memory); }
+
+    // removes the file or frees the bytes
+    void remove()
+    {
+        file.remove();
+        memory.reset();
+    }
+};
+
+/**
+ * @brief reads the values of a temporary_array (a fixed number of bytes per value, little endian): from its file with
+ *        an array_file_reader, or from RAM
+ */
+class array_reader {
+private:
+    std::unique_ptr<array_file_reader> file; // the reader of the file (nullptr if the array is in RAM)
+    const uint8_t* memory; // the bytes of the array, if it is in RAM
     uint64_t width; // bytes per value
     uint64_t mask; // the low 8 * width bits
-    uint64_t read_bytes; // number of bytes read at once
-    uint64_t num_values = 0; // number of values in the file
-    uint8_t* buffer = nullptr; // read_bytes + 2 * sector bytes (rounded up to a multiple of sector), aligned to sector
-    int fd = -1; // file descriptor
-    bool direct = false; // true <=> the file is opened with O_DIRECT
-    uint64_t beg = 0, end = 0; // the values [beg, end) are in the buffer
-    const uint8_t* data = nullptr; // the bytes of value beg in the buffer
-
-    // reads the values [i, i + read_bytes / width) into the buffer
-    void read_from(uint64_t i)
-    {
-        beg = i;
-        end = std::min(num_values, i + std::max<uint64_t>(1, read_bytes / width));
-        const uint64_t first = beg * width, last = end * width; // the bytes [first, last) are needed
-        const uint64_t read_beg = direct ? (first / sector) * sector : first;
-        const uint64_t read_end = direct ? div_ceil(last, sector) * sector : last;
-        const uint64_t num_read = pread_fully(fd, buffer, read_end - read_beg, read_beg);
-        if (read_beg + num_read < last) throw std::runtime_error("pfp_rlbwt: cannot read a temporary file");
-        if (!direct) platform::drop_cached(fd, read_beg, num_read);
-        data = buffer + (first - read_beg);
-    }
 
 public:
     /**
-     * @brief opens a file of values
-     * @param path path of the file
+     * @brief opens an array
+     * @param a the array
      * @param width bytes per value
-     * @param read_bytes number of bytes read at once (at least width)
+     * @param read_bytes number of bytes read from the file at once (at least width)
      */
-    array_file_reader(const std::string& path, uint64_t width, uint64_t read_bytes = direct_reader::block)
-        : width(width), mask(width >= sizeof(uint64_t) ? ~uint64_t { 0 } : (uint64_t { 1 } << (8 * width)) - 1),
-          read_bytes(read_bytes)
+    array_reader(const temporary_array& a, uint64_t width, uint64_t read_bytes = temporary_read_bytes)
+        : memory(a.data()), width(width),
+          mask(width >= sizeof(uint64_t) ? ~uint64_t { 0 } : (uint64_t { 1 } << (8 * width)) - 1)
     {
-        std::error_code ec;
-        num_values = std::filesystem::file_size(path, ec) / width;
-        if (ec) throw std::runtime_error("pfp_rlbwt: cannot read " + path);
-        buffer = (uint8_t*) platform::allocate_aligned_counted(div_ceil(read_bytes, sector) * sector + 2 * sector,
-            sector);
-        if (buffer == nullptr) throw std::bad_alloc();
-        fd = open_direct_or_buffered(path, platform::file_access::read, direct);
-
-        if (fd < 0) {
-            platform::free_aligned(buffer);
-            throw std::runtime_error("pfp_rlbwt: cannot read " + path);
-        }
-
-        if (!direct) advise_uncached(fd);
+        if (!a.is_in_memory()) file = std::make_unique<array_file_reader>(a.path(), width, read_bytes);
     }
-
-    ~array_file_reader()
-    {
-        platform::free_aligned(buffer);
-        platform::close(fd);
-    }
-
-    array_file_reader(const array_file_reader&) = delete;
-    array_file_reader& operator=(const array_file_reader&) = delete;
 
     // returns the bytes of value i
-    inline const uint8_t* bytes(uint64_t i)
-    {
-        if (i < beg || i >= end) [[unlikely]] read_from(i);
-        return data + (i - beg) * width;
-    }
+    inline const uint8_t* bytes(uint64_t i) { return file == nullptr ? memory + i * width : file->bytes(i); }
 
-    // returns value i (width <= 8; loads 8 bytes, which the buffer holds after each value, and masks them)
+    // returns value i (width <= 8)
     inline uint64_t operator[](uint64_t i)
     {
         uint64_t val;
@@ -572,15 +569,8 @@ public:
     // copies the values [from, to) to dst
     void read(uint64_t from, uint64_t to, void* dst)
     {
-        uint8_t* out = (uint8_t*) dst;
-
-        for (uint64_t i = from; i < to;) {
-            const uint8_t* src = bytes(i);
-            const uint64_t num = std::min(to, end) - i;
-            std::memcpy(out, src, num * width);
-            out += num * width;
-            i += num;
-        }
+        if (file != nullptr) file->read(from, to, dst);
+        else std::memcpy(dst, memory + from * width, (to - from) * width);
     }
 };
 

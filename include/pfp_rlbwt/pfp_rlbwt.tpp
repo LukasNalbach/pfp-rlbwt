@@ -32,9 +32,8 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <iomanip>
+#include <functional>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,64 +41,14 @@
 #include <misc/files.hpp>
 #include <misc/log.hpp>
 
-#include <pfp_rlbwt/construction/merge.hpp>
+#include <pfp_rlbwt/construction/recursion.hpp>
 
 namespace pfp_rlbwt {
 
-// a reader of a file_source
-template <typename sym_t>
-class file_reader : public text_source<sym_t>::reader {
-private:
-    direct_reader file;
-    uint64_t n; // n, the number of symbols in the file
-    bool reverse; // true <=> the text is the reversed file
-    const std::array<uint8_t, 256>* map; // the map of the bytes of the file_source (nullptr: not mapped)
-
-public:
-    file_reader(const std::string& path, uint64_t n, bool reverse, const std::array<uint8_t, 256>* map)
-        : file(path), n(n), reverse(reverse), map(map)
-    { }
-
-    void read(uint64_t pos, uint64_t len, sym_t* dst) override
-    {
-        const uint64_t beg = reverse ? n - pos - len : pos;
-        std::memcpy(dst, file.read(beg * sizeof(sym_t), (beg + len) * sizeof(sym_t)), len * sizeof(sym_t));
-        if (reverse) std::reverse(dst, dst + len);
-        if (map != nullptr) for (uint64_t i = 0; i < len; i++) dst[i] = (*map)[dst[i]];
-    }
-};
-
-// a reader of a memory_source
-template <typename sym_t>
-class memory_reader : public text_source<sym_t>::reader {
-private:
-    const sym_t* text; // text[0..n-1]
-    uint64_t n; // n, the number of symbols
-    bool reverse; // true <=> the text is text[0..n-1] reversed
-
-public:
-    memory_reader(const sym_t* text, uint64_t n, bool reverse) : text(text), n(n), reverse(reverse) { }
-
-    void read(uint64_t pos, uint64_t len, sym_t* dst) override
-    {
-        if (reverse) std::reverse_copy(text + n - pos - len, text + n - pos, dst);
-        else std::memcpy(dst, text + pos, len * sizeof(sym_t));
-    }
-};
-
-template <typename sym_t>
-file_source<sym_t>::file_source(const std::string& path, bool reverse, const std::array<uint8_t, 256>* map)
-    : path(path), reverse(reverse), mapped(map != nullptr)
+// returns the name of the text of the current level in the log: T, P, P_2, ... (see current_level)
+inline std::string level_text_name()
 {
-    std::error_code ec;
-    const uint64_t bytes = std::filesystem::file_size(path, ec);
-    if (ec) throw std::runtime_error("pfp_rlbwt: cannot read " + path);
-    if (bytes % sizeof(sym_t) != 0)
-        throw std::invalid_argument("pfp_rlbwt: the file size is not a multiple of the symbol width");
-    if (mapped && sizeof(sym_t) != 1)
-        throw std::invalid_argument("pfp_rlbwt: a map is only applied to one-byte symbols");
-    n = bytes / sizeof(sym_t);
-    if (mapped) this->map = *map;
+    return current_level == 1 ? "T" : current_level == 2 ? "P" : "P_" + std::to_string(current_level - 1);
 }
 
 // returns the name of the phase that computes the outputs selected in prm (see merge)
@@ -122,7 +71,7 @@ inline std::string merge_phase_name(const params& prm, bool writes_run_data)
     for (uint64_t i = 0; i < parts.size(); i++)
         name += (i == 0 ? " " : (i + 1 == parts.size() ? " and " : ", ")) + parts[i];
 
-    return name;
+    return current_level == 1 ? name : name + " of " + level_text_name();
 }
 
 /**
@@ -132,24 +81,47 @@ inline std::string merge_phase_name(const params& prm, bool writes_run_data)
  * @param prs the parsing; its phrases are freed
  * @param prm parameters
  * @param prefix path prefix of the output files
+ * @param level_out if not nullptr, receives the runs and the suffix array (see build_level)
  * @return the number r of runs
  */
 template <typename sym_t, typename idx_t>
-uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::string& prefix)
+uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::string& prefix,
+    level_output* level_out)
 {
     std::chrono::steady_clock::time_point time;
     const uint16_t p = prm.num_threads;
+    const uint64_t J = prs.num_phrase_runs;
 
-    log_phase_start(prm.log, time, "storing the phrase runs");
-    phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p);
+    // P is suffix-sorted with its prefix-free parsing if J >= recursion_min_phrase_runs and J <= n / 2
+    bool recursive = prm.recursive && J >= prm.recursion_min_phrase_runs && 2 * J <= prs.n;
+
+    log_phase_start(prm.log, time, "storing the phrase runs" + std::string(current_level == 1 ? ""
+        : " of " + level_name("P")));
+    phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p, recursive);
     log_phase_end(prm.log, time);
 
-    // the suffix array of the dictionary is built before the one of the parse and stays on disk
+    /* the suffix array of the dictionary is built before the one of P and stays on disk; if P is suffix-sorted
+       recursively, the next level runs before (it frees the word ids of the phrase runs) and Psi is built after */
+    parse_sa<idx_t> psa;
+    level_output next_level; // the runs of the BWT of P, if P is suffix-sorted recursively
+    if (recursive) {
+        psa = sort_parse_recursively<idx_t, sym_t>(arr, J, prs.w, prs.dict, prefix, prm, time, next_level);
+
+        // the PFP of P does not halve P: P is suffix-sorted directly
+        if (!next_level.completed) {
+            recursive = false;
+            psa = parse_sa<idx_t>();
+            log_phase_start(prm.log, time, "storing " + level_name("P") + ", which its PFP does not halve");
+            store_parse(arr, J, p);
+            log_phase_end(prm.log, time);
+        }
+    }
+
     dictionary_sa<idx_t> dsa = build_dictionary_sa<idx_t, sym_t>(prs.dict, prs.max_symbol, prs.w,
         prefix + ext_dictionary_sa, prm, time);
 
-    parse_sa<idx_t> psa = build_parse_sa<idx_t, sym_t>(arr, prs.num_phrase_runs, prs.w, prs.dict,
-        prefix + ext_parse_isa, prm, time);
+    if (recursive) build_psi_from_runs<idx_t, sym_t>(psa, arr, next_level, J, prs.w, prs.dict, prm, time);
+    else psa = build_parse_sa<idx_t, sym_t>(arr, J, prs.w, prs.dict, prefix + ext_parse_isa, prm, time);
 
     uint64_t r;
 
@@ -172,33 +144,25 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
         log_phase_end(prm.log, time);
     } else {
         log_phase_start(prm.log, time, merge_phase_name(prm, true));
-        r = merge<sym_t, idx_t>(prs, dsa, psa, arr, prm, prefix, true);
+        r = merge<sym_t, idx_t>(prs, dsa, psa, arr, prm, prefix, true, nullptr, nullptr, level_out);
         log_phase_end(prm.log, time);
     }
 
     return r;
 }
 
-template <typename sym_t>
-result build(const text_source<sym_t>& text, const std::string& prefix, const params& prm_in)
+// checks the parameters that do not depend on the length of the text (see build)
+inline void check_params(const params& prm)
 {
-    // check the parameters and choose the defaults
-    params prm = prm_in;
-    const uint64_t n = text.size();
     if (prm.window == 0 || prm.modulus == 0 || prm.num_threads == 0)
         throw std::invalid_argument("pfp_rlbwt: invalid params");
-    // the text positions and the window fit into max_value_bytes bytes: n + window < 2^(8 * max_value_bytes)
-    constexpr uint64_t position_limit = uint64_t { 1 } << (8 * max_value_bytes);
-    if (prm.window >= position_limit || n >= position_limit - prm.window)
-        throw std::invalid_argument("pfp_rlbwt: the text is too long (at most 2^48 - window - 1 symbols)");
-    const uint8_t min_bytes = value_bytes(n + prm.window);
-    if (prm.position_bytes == 0) prm.position_bytes = min_bytes;
-    if (prm.position_bytes < min_bytes || prm.position_bytes > max_value_bytes)
-        throw std::invalid_argument("pfp_rlbwt: invalid position_bytes");
+    if (prm.recursive && (prm.recursion_window == 0 || prm.recursion_modulus == 0))
+        throw std::invalid_argument("pfp_rlbwt: invalid recursion params");
     if (prm.runs_per_block == 0 || prm.runs_per_block % byte_bits != 0)
         throw std::invalid_argument("pfp_rlbwt: runs_per_block is not a positive multiple of 8");
     if (prm.runs_per_symbol_sample == 0 || prm.runs_per_symbol_sample > prm.runs_per_block)
         throw std::invalid_argument("pfp_rlbwt: runs_per_symbol_sample is not in [1..runs_per_block]");
+    if (prm.lcp_values_per_block == 0) throw std::invalid_argument("pfp_rlbwt: lcp_values_per_block is not positive");
 
     for (uint64_t i = 0; i < prm.extra_sections.size(); i++) {
         const uint64_t id = prm.extra_sections[i].id;
@@ -207,20 +171,67 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
         for (uint64_t j = 0; j < i; j++) if (prm.extra_sections[j].id == id)
             throw std::invalid_argument("pfp_rlbwt: two extra sections have the same identifier");
     }
+}
 
+/**
+ * @brief checks that a text of length n fits the parameters and chooses position_bytes if it is 0
+ * @param n the length of the text
+ * @param prm the parameters (position_bytes is set)
+ */
+inline void fit_text_length(uint64_t n, params& prm)
+{
+    // the text positions and the window fit into max_value_bytes bytes: n + window < 2^(8 * max_value_bytes)
+    constexpr uint64_t position_limit = uint64_t { 1 } << (8 * max_value_bytes);
+    if (prm.window >= position_limit || n >= position_limit - prm.window)
+        throw std::invalid_argument("pfp_rlbwt: the text is too long (at most 2^48 - window - 1 symbols)");
+    const uint8_t min_bytes = value_bytes(n + prm.window);
+    if (prm.position_bytes == 0) prm.position_bytes = min_bytes;
+    if (prm.position_bytes < min_bytes || prm.position_bytes > max_value_bytes)
+        throw std::invalid_argument("pfp_rlbwt: invalid position_bytes");
+}
+
+/**
+ * @brief computes the prefix-free parsing of the text, logs its sizes and builds the output from it (see build and
+ *        build_level)
+ * @param text the text T
+ * @param prefix path prefix of the output files
+ * @param prm parameters (checked; position_bytes is set if the length of T is known, else after the parse)
+ * @param level_out if not nullptr, receives the runs and the suffix array (see build_level)
+ * @return sizes of the parsing and of the output
+ */
+template <typename sym_t>
+result build_parsed(text_ranges<sym_t>& text, const std::string& prefix, params prm, level_output* level_out)
+{
     std::chrono::steady_clock::time_point time;
-    log_phase_start(prm.log, time, "building PFP");
+    log_phase_start(prm.log, time, current_level == 1 ? "building PFP" : "building PFP of " + level_text_name());
+    text.split(prm.num_threads);
     const uint64_t seed = choose_trigger_seed<sym_t>(text, prm);
-    parsing<sym_t> prs = parse<sym_t>(text, prm, seed);
+    /* on a level after the first, level_out->parsed decides after the parse whether the level continues (see parse),
+       and a degenerate parse is not repeated (its prefix-free parsing does not halve the text) */
+    bool stopped = false;
+    std::function<bool(const result&)> parsed = [&](const result& sizes) {
+        stopped = !level_out->parsed(sizes);
+        return !stopped;
+    };
+
+    const bool decides = level_out != nullptr && level_out->parsed;
+    parsing<sym_t> prs = parse<sym_t>(text, prm, seed, decides ? &parsed : nullptr);
     log_phase_end(prm.log, time);
+    const uint64_t n = prs.n;
+
+    if (!text.size_known()) {
+        fit_text_length(n, prm);
+        prs.position_bytes = prm.position_bytes;
+    }
 
     // a degenerate parse: parse again with the other seed and keep the parse with more phrases
-    if (prs.num_phrases < n / (degenerate_parse_tolerance * prm.modulus)) {
+    if (level_out == nullptr && prs.num_phrases < n / (degenerate_parse_tolerance * prm.modulus)) {
         log_phase_start(prm.log, time, "only " + format_number(prs.num_phrases) + " phrases, reparsing");
         parsing<sym_t> retry = parse<sym_t>(text, prm, seed == 0 ? retry_trigger_seed : 0);
         log_phase_end(prm.log, time);
         if (retry.num_phrases > prs.num_phrases) prs = std::move(retry);
     }
+
     result res;
     res.n_with_terminator = n + 1;
     res.num_phrases = prs.num_phrases;
@@ -230,23 +241,63 @@ result build(const text_source<sym_t>& text, const std::string& prefix, const pa
 
     if (prm.log) {
         const uint64_t pfp_size = res.num_phrases + res.dictionary_size;
-        std::ostringstream ratio;
-        ratio << std::fixed << std::setprecision(2) << double(n) / double(pfp_size);
-        std::cout << "|P| = " << format_number(res.num_phrases) << "; sigma(P) = " << format_number(res.num_words)
-                  << "; |D| = " << format_number(res.dictionary_size) << std::endl
-                  << "|PFP| = |P| + |D| = " << format_number(pfp_size) << "; n / |PFP| = " << ratio.str() << std::endl;
+        log_out() << "|" << level_name("P") << "| = " << format_number(res.num_phrase_runs) << " phrase runs, "
+                  << format_number(res.num_phrases) << " phrases, " << format_number(res.num_words) << " words, |"
+                  << level_name("D") << "| = " << format_number(res.dictionary_size) << ", |PFP| = "
+                  << format_number(pfp_size) << ", n/|PFP| = " << format_ratio(double(n) / double(pfp_size))
+                  << std::endl;
     }
+
+    if (stopped) return res;
 
     // the largest length and alphabet size of the inputs of libsais choose the type of the suffix arrays
     const uint64_t max_index = std::max({ res.num_phrase_runs + 1, res.dictionary_size,
         dictionary_alphabet_size(prs.dict, prs.max_symbol) });
 
-    if (max_index <= PFP_RLBWT_MAX_INDEX32) res.r = build_from_parsing<sym_t, int32_t>(prs, prm, prefix);
-    else if (max_index <= PFP_RLBWT_MAX_INDEX40) res.r = build_from_parsing<sym_t, sa_int40_t>(prs, prm, prefix);
-    else if (max_index <= uint64_t(SA_INT48_MAX_N)) res.r = build_from_parsing<sym_t, sa_int48_t>(prs, prm, prefix);
-    else throw std::length_error("pfp_rlbwt: the parsing is too large for 48-bit suffix arrays");
+    if (max_index <= PFP_RLBWT_MAX_INDEX32) {
+        res.r = build_from_parsing<sym_t, int32_t>(prs, prm, prefix, level_out);
+    } else if (max_index <= PFP_RLBWT_MAX_INDEX40) {
+        res.r = build_from_parsing<sym_t, sa_int40_t>(prs, prm, prefix, level_out);
+    } else if (max_index <= uint64_t(SA_INT48_MAX_N)) {
+        res.r = build_from_parsing<sym_t, sa_int48_t>(prs, prm, prefix, level_out);
+    } else {
+        throw std::length_error("pfp_rlbwt: the parsing is too large for 48-bit suffix arrays");
+    }
 
     return res;
+}
+
+template <typename sym_t>
+void build_level(const text_source<sym_t>& text, const std::string& prefix, const params& prm_in, level_output& out)
+{
+    params prm = prm_in;
+    prm.position_bytes = value_bytes(text.size() + prm.window);
+    source_ranges<sym_t> ranges(text);
+
+    // current_level is the number of this level while it is built
+    struct level_scope {
+        level_scope() { current_level++; }
+        ~level_scope() { current_level--; }
+    } scope;
+
+    out.r = build_parsed<sym_t>(ranges, prefix, prm, &out).r;
+    out.completed = out.r != 0;
+}
+
+template <typename sym_t>
+result build(text_ranges<sym_t>& text, const std::string& prefix, const params& prm_in)
+{
+    params prm = prm_in;
+    check_params(prm);
+    if (text.size_known()) fit_text_length(text.max_size(), prm);
+    return build_parsed<sym_t>(text, prefix, prm, nullptr);
+}
+
+template <typename sym_t>
+result build(const text_source<sym_t>& text, const std::string& prefix, const params& prm)
+{
+    source_ranges<sym_t> ranges(text);
+    return build<sym_t>(ranges, prefix, prm);
 }
 
 } // namespace pfp_rlbwt
