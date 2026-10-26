@@ -24,8 +24,9 @@
  * SOFTWARE.
  */
 
-// explicit instantiations of pfp_rlbwt::build and of the text sources for one symbol type; this file is compiled
-// once per symbol width (PFP_RLBWT_SYMBOL_BYTES in [1, 8], see CMakeLists.txt)
+// explicit instantiations of pfp_rlbwt::build, of the text sources and of the levels of the recursive prefix-free
+// parsing for one symbol type; this file is compiled once per symbol width (PFP_RLBWT_SYMBOL_BYTES in [1, 8], see
+// CMakeLists.txt)
 
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
 
@@ -33,9 +34,19 @@ namespace pfp_rlbwt {
 
 using instantiated_symbol_t = uint_of_width_t<PFP_RLBWT_SYMBOL_BYTES>;
 
-template class file_source<instantiated_symbol_t>;
-template class memory_source<instantiated_symbol_t>;
 template result build<instantiated_symbol_t>(const text_source<instantiated_symbol_t>&, const std::string&,
     const params&);
+template result build<instantiated_symbol_t>(text_ranges<instantiated_symbol_t>&, const std::string&,
+    const params&);
+
+// the levels after the first of the recursive prefix-free parsing, whose symbol types are uint24_t, uint32_t and
+// uint64_t (see build_level and sort_parse_recursively)
+#if PFP_RLBWT_SYMBOL_BYTES == 3 || PFP_RLBWT_SYMBOL_BYTES == 4 || PFP_RLBWT_SYMBOL_BYTES == 8
+template void build_level<instantiated_symbol_t>(const text_source<instantiated_symbol_t>&, const std::string&,
+    const params&, level_output&);
+#endif
 
 } // namespace pfp_rlbwt
+
+template class rlbwt::file_source<pfp_rlbwt::instantiated_symbol_t>;
+template class rlbwt::memory_source<pfp_rlbwt::instantiated_symbol_t>;

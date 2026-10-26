@@ -53,7 +53,7 @@ namespace {
 // the options of pfp-rlbwt
 struct pfp_rlbwt_cli_t {
     std::string path_input_file;
-    std::string prefix; // -o: prefix of the output files; empty <=> <input_file>
+    std::string base_name; // -o: the base name of the output files; empty <=> <input_file>
     std::string text_name; // <name> of -m
     uint64_t p = omp_get_max_threads(); // -p
     uint64_t symbol_bytes = 1; // -symbol-bytes: bytes per symbol of the input file
@@ -74,11 +74,12 @@ void print_help(std::ostream& out)
     const std::string min_symbol_str = std::to_string(min_symbol);
     help_printer h(out);
     h.intro(std::string("pfp-rlbwt: computes the run-length encoded BWT of a file with the prefix-free parsing and "
-        "writes it to <prefix>") + ext_runs + ", optionally with the suffix array values at the starts and at the "
+        "writes it to <base_name>") + ext_runs + ", optionally with the suffix array values at the starts and at the "
         "ends of its runs and the LCP values at the starts of its runs; optionally also the BWT, the suffix array and "
         "the LCP array with one value per position.",
         "pfp-rlbwt [options] <input_file>");
-    h.option("<input_file>", "a path", "the text");
+    h.group("arguments");
+    h.option("<input_file>", "", "the text");
     h.group("input");
     h.option("-symbol-bytes <b>", "integer in [1, " + std::to_string(sizeof(uint64_t)) + "] (default: 1)",
         "the number of bytes per symbol of the input file (little endian); every symbol has to be at least "
@@ -95,20 +96,30 @@ void print_help(std::ostream& out)
     h.option("-pos-bytes <b>", "integer in [" + std::to_string(min_value_bytes) + ", " + std::to_string(max_value_bytes)
         + "] (default: the fewest that hold n + w)", "the number of bytes per text position in the arrays of the "
         "construction");
+    h.option("-recursive <r>", "on | off (default: on)", "on: suffix-sort the parse of the phrase runs with its "
+        "prefix-free parsing, recursively, as long as a parse has at least <j> phrase runs (-rec-min), at most half as "
+        "many as its text has symbols, and a prefix-free parsing at most half as large as it; off: with a suffix array "
+        "construction");
+    h.option("-rec-w <w>", "integer >= 1 (default: " + std::to_string(defaults.recursion_window) + ")",
+        "the length of a trigger string in the prefix-free parsings of the parses (-recursive on)");
+    h.option("-rec-mod <m>", "integer >= 1 (default: " + std::to_string(defaults.recursion_modulus) + ")",
+        "a window of a parse is a trigger string with probability 1/m (-recursive on)");
+    h.option("-rec-min <j>", "integer >= 0 (default: " + std::to_string(defaults.recursion_min_phrase_runs) + ")",
+        "the fewest phrase runs of a parse that is parsed (-recursive on)");
     h.group("output");
-    h.option("-o <prefix>", "a path (default: <input_file>)", "the prefix of the output files");
-    h.option("-format <f>", "plain or compressed (default: plain)", std::string("the format of <prefix>") + ext_runs
+    h.option("-o <base_name>", "a path (default: <input_file>)", "the base name of the output files");
+    h.option("-format <f>", "plain | compressed (default: plain)", std::string("the format of <base_name>") + ext_runs
         + ": plain stores one record per run (its start, its symbol and its samples, each with a fixed number of "
         "bytes); compressed stores the starts Elias-Fano coded and the symbols Huffman coded in blocks, the SA "
         "samples bit-packed and the LCP samples with RLE-GEF, each readable with O(1) disk reads");
-    h.option("-sa", "", std::string("also write the SA values at the starts and at the ends of the runs to <prefix>")
+    h.option("-sa", "", std::string("also write the SA values at the starts and at the ends of the runs to <base_name>")
         + ext_runs);
-    h.option("-lcp", "", std::string("also write the LCP values at the starts of the runs to <prefix>") + ext_runs);
-    h.option("-full-bwt", "", std::string("write <prefix>") + ext_bwt + " (the BWT, one symbol of the input width "
+    h.option("-lcp", "", std::string("also write the LCP values at the starts of the runs to <base_name>") + ext_runs);
+    h.option("-full-bwt", "", std::string("write <base_name>") + ext_bwt + " (the BWT, one symbol of the input width "
         "per position)");
-    h.option("-full-sa", "", std::string("write <prefix>") + ext_sa + " (the suffix array, the fewest bytes per "
+    h.option("-full-sa", "", std::string("write <base_name>") + ext_sa + " (the suffix array, the fewest bytes per "
         "value that hold n + 1)");
-    h.option("-full-lcp", "", std::string("write <prefix>") + ext_lcp + " (the LCP array, the fewest bytes per value "
+    h.option("-full-lcp", "", std::string("write <base_name>") + ext_lcp + " (the LCP array, the fewest bytes per value "
         "that hold n + 1)");
     h.group("execution");
     h.option_threads();
@@ -130,7 +141,7 @@ void read_arguments(int argc, char** argv)
         const std::string s = args.next();
 
         if (s == "-o") {
-            cli.prefix = args.value(s);
+            cli.base_name = args.value(s);
         } else if (s == "-p") {
             cli.p = args.integer(s, 1, omp_get_max_threads());
         } else if (s == "-symbol-bytes") {
@@ -147,7 +158,18 @@ void read_arguments(int argc, char** argv)
             const std::string format = args.value(s);
             if (format == "plain") params.format = pfp_rlbwt::file_format::plain;
             else if (format == "compressed") params.format = pfp_rlbwt::file_format::compressed;
-            else throw usage_error("-format must be plain or compressed");
+            else throw usage_error("-format expects plain or compressed");
+        } else if (s == "-recursive") {
+            const std::string recursive = args.value(s);
+            if (recursive == "on") params.recursive = true;
+            else if (recursive == "off") params.recursive = false;
+            else throw usage_error("-recursive expects on or off");
+        } else if (s == "-rec-w") {
+            params.recursion_window = args.integer(s, 1);
+        } else if (s == "-rec-mod") {
+            params.recursion_modulus = args.integer(s, 1);
+        } else if (s == "-rec-min") {
+            params.recursion_min_phrase_runs = args.integer(s, 0);
         } else if (s == "-pos-bytes") {
             params.position_bytes = args.integer(s, pfp_rlbwt::min_value_bytes, pfp_rlbwt::max_value_bytes);
         } else if (s == "-sa") {
@@ -167,11 +189,11 @@ void read_arguments(int argc, char** argv)
         }
     }
 
-    if (args.empty()) throw usage_error("missing <input_file>");
+    if (args.empty()) throw usage_error("expected <input_file>");
     cli.path_input_file = args.next();
     if (!args.empty()) throw usage_error("expected exactly one <input_file>");
-    if (cli.prefix.empty()) cli.prefix = cli.path_input_file;
-    if (cli.map_bytes && cli.symbol_bytes != 1) throw usage_error("-map requires -symbol-bytes 1");
+    if (cli.base_name.empty()) cli.base_name = cli.path_input_file;
+    if (cli.map_bytes && cli.symbol_bytes != 1) throw usage_error("-map needs -symbol-bytes 1");
 }
 
 // returns the map of the bytes occurring in the input file to min_symbol, min_symbol + 1, ... in increasing order
@@ -225,7 +247,7 @@ template <typename sym_t>
 pfp_rlbwt::result build(const std::array<uint8_t, 256>* map)
 {
     const pfp_rlbwt::file_source<sym_t> text(cli.path_input_file, cli.reverse, map);
-    return pfp_rlbwt::build(text, cli.prefix, cli.params);
+    return pfp_rlbwt::build(text, cli.base_name, cli.params);
 }
 
 // computes the output files of the input file
@@ -259,16 +281,16 @@ void run()
 
     for (const auto& [written, ext] : outputs) {
         if (!written) continue;
-        output_names += (output_names.empty() ? "" : ", ") + cli.prefix + ext;
+        output_names += (output_names.empty() ? "" : ", ") + cli.base_name + ext;
         if (ext == pfp_rlbwt::ext_runs) output_names += samples;
     }
 
-    std::cout << "building the RLBWT of " << (cli.reverse ? "the reversed " : "") << cli.path_input_file << " ("
-              << format_size(bytes) << ") with " << format_threads(p) << ", w = " << params.window << ", p = "
-              << params.modulus
-              << (cli.symbol_bytes == 1 ? std::string() : ", " + std::to_string(cli.symbol_bytes) + " bytes per symbol")
-              << std::endl;
-    std::cout << "output: " << output_names << std::endl;
+    log_run_start(std::string("building the RLBWT of") + (cli.reverse ? " the reversed" : ""), cli.path_input_file,
+        bytes, p, "w = " + format_number(params.window) + " symbols, mod = " + format_number(params.modulus)
+        + (cli.symbol_bytes == 1 ? std::string() : ", symbol-bytes = " + std::to_string(cli.symbol_bytes))
+        + (params.recursive ? ", recursive with w = " + format_number(params.recursion_window) + " symbols, mod = "
+            + format_number(params.recursion_modulus) : std::string()),
+        output_names);
 
     const auto time_start = now();
     const uint64_t baseline_mem_usage = malloc_count_current();
@@ -288,7 +310,7 @@ void run()
     switch (cli.symbol_bytes) {
         #define PFP_RLBWT_SYMBOL_CASE(sym_t) \
             case sizeof(sym_t): result = build<sym_t>(sizeof(sym_t) == 1 && cli.map_bytes ? &map : nullptr); break;
-        PFP_RLBWT_FOR_EACH_SYMBOL_TYPE(PFP_RLBWT_SYMBOL_CASE)
+        STRING_UTILS_FOR_EACH_SYMBOL_TYPE(PFP_RLBWT_SYMBOL_CASE)
         #undef PFP_RLBWT_SYMBOL_CASE
     }
 
@@ -299,25 +321,29 @@ void run()
 
     for (const auto& [written, ext] : outputs) {
         if (!written) continue;
-        output_size += std::filesystem::file_size(cli.prefix + ext, ec);
-        if (ec) throw std::runtime_error("cannot read " + cli.prefix + ext);
+        output_size += std::filesystem::file_size(cli.base_name + ext, ec);
+        if (ec) throw std::runtime_error("cannot read " + cli.base_name + ext);
     }
 
-    std::cout << "n = " << format_number(result.n_with_terminator) << ", r = " << format_number(result.r) << ", n/r = "
-              << format_ratio(double(result.n_with_terminator) / double(result.r)) << std::endl;
+    const uint64_t n = result.n_with_terminator - 1;
+    log_out() << "n = " << format_number(n) << ", r = " << format_number(result.r) << ", n/r = "
+              << format_ratio(double(n) / double(result.r)) << std::endl;
     log_construction_summary(time_ns, bytes, peak);
     log_output_size("output", output_size, bytes);
 
     if (cli.measurement_file.is_open()) {
         result_line(cli.measurement_file)
-            ("type", "pfp")
+            ("algo", "build_pfp_rlbwt")
             ("text", cli.text_name)
-            ("n", result.n_with_terminator)
+            ("n", n)
             ("r", result.r)
             ("symbol_bytes", cli.symbol_bytes)
-            ("reverse", cli.reverse)
+            ("reversed", cli.reverse)
             ("window", params.window)
             ("modulus", params.modulus)
+            ("recursive", params.recursive)
+            ("recursion_window", params.recursion_window)
+            ("recursion_modulus", params.recursion_modulus)
             ("num_threads", p)
             ("phrases", result.num_phrases)
             ("phrase_runs", result.num_phrase_runs)

@@ -53,10 +53,10 @@
 #include <misc/temp_files.hpp>
 #include <misc/threads.hpp>
 #include <pfp_rlbwt/fasta.hpp>
-#include <pfp_rlbwt/output/readers.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
 #include <pfp_rlbwt/comp/pfp_rlbwt_comp.hpp>
 #include <pfp_rlbwt/comp/run_model.hpp>
+#include <rlbwt/readers.hpp>
 
 namespace pfp_rlbwt::comp {
 
@@ -178,6 +178,7 @@ inline void append_rlbwt(uint64_t n, const byte_set& occurs, make_source_t make_
     // [0..num_blocks-1] the coded run symbols and run lengths of each block
     std::vector<std::vector<uint8_t>> symbol_bytes(num_blocks), length_bytes(num_blocks);
     std::atomic<uint64_t> next_block = 0;
+    phase_progress prog(params.log, r);
 
     run_on_threads(threads, [&](uint64_t t, uint64_t) {
         uint64_t* thread_smallest = smallest.data() + t * k;
@@ -209,8 +210,11 @@ inline void append_rlbwt(uint64_t n, const byte_set& occurs, make_source_t make_
 
             symbol_bytes[b] = symbols.finish();
             length_bytes[b] = lengths.finish();
+            prog.advance(end - first);
         }
     });
+
+    prog.finish();
 
     // smallest[g] and run_of[g] become the smallest SA value in range g at a run start and its run
     for (uint64_t t = 1; t < threads; t++) {

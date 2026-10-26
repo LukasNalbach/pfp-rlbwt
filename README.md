@@ -1,6 +1,6 @@
 # pfp-rlbwt
 
-This repository contains a C++ library that computes the run-length encoded BWT of a text with prefix-free parsing [1], optionally together with the suffix array values at the starts and at the ends of the BWT runs and the LCP values at the starts of the runs, and writes it to a file in one of two formats: plain (one record per run with byte-aligned fields) or compressed (each value readable with O(1) disk reads). It provides streamed and random-access readers of both formats on the disk and two representations in RAM. Optionally, it also writes the BWT with one symbol per position, the suffix array and the LCP array. It also contains a compressor (pfp-rlbwt-comp) that stores a byte text as its run-length encoded BWT.
+This repository contains a C++ library that computes the run-length encoded BWT of a text with prefix-free parsing [1] (recursive [6]), optionally together with the suffix array values at the starts and at the ends of the BWT runs and the LCP values at the starts of the runs, and writes it to a file in one of two formats: plain (one record per run with byte-aligned fields) or compressed (each value readable with O(1) disk reads). It provides streamed and random-access readers of both formats on the disk and two representations in RAM. Optionally, it also writes the BWT with one symbol per position, the suffix array and the LCP array. It also contains a compressor (pfp-rlbwt-comp) that stores a byte text as its run-length encoded BWT.
 
 ## Build Instructions
 
@@ -11,11 +11,11 @@ cmake -B build
 cmake --build build -j
 ```
 
-CMake fetches the required submodule [string-utils](https://github.com/LukasNalbach/string-utils) (and, for the compressor, [move-data-structure](https://github.com/LukasNalbach/move-data-structure), see below). The command-line tools are built into `build/cli/` and the tests into `build/tests/`; `PFP_RLBWT_BUILD_CLI` and `PFP_RLBWT_BUILD_TESTS` turn them on or off (both are `ON` if pfp-rlbwt is the top-level project). The general build options (`PFP_RLBWT_MARCH_NATIVE`, `PFP_RLBWT_ENABLE_LTO`, ...) and environment variables (`PFP_RLBWT_TMPDIR`, ...) are described in [string-utils](https://github.com/LukasNalbach/string-utils).
+CMake fetches the required submodules [string-utils](https://github.com/LukasNalbach/string-utils) and [move-data-structure](https://github.com/LukasNalbach/move-data-structure). The command-line tools are built into `build/cli/` and the tests into `build/tests/`; `PFP_RLBWT_BUILD_CLI` and `PFP_RLBWT_BUILD_TESTS` turn them on or off (both are `ON` if pfp-rlbwt is the top-level project). The general build options (`PFP_RLBWT_MARCH_NATIVE`, `PFP_RLBWT_ENABLE_LTO`, ...) and environment variables (`PFP_RLBWT_TMPDIR`, ...) are described in [string-utils](https://github.com/LukasNalbach/string-utils).
 
 ## CLI Tool
 
-**pfp-rlbwt** computes the output of `build` (see below) for a file and writes it to files with the prefix `<input_file>`; `-format compressed` writes the compressed format instead of the plain one, `-sa` and `-lcp` add the SA and LCP samples to the runs file, and it prints its options with `-h`.
+**pfp-rlbwt** computes the output of `build` (see below) for a file and writes it to files with the base name `<input_file>` (`-o <base_name>`); `-format compressed` writes the compressed format instead of the plain one, `-sa` and `-lcp` add the SA and LCP samples to the runs file, `-recursive off` suffix-sorts the parse directly instead of with its prefix-free parsing (see below), and it prints its options with `-h`.
 
 ```shell
 build/cli/pfp-rlbwt -p 8 text.txt              # text.txt.bwt-runs (plain)
@@ -31,7 +31,7 @@ add_subdirectory(external/pfp-rlbwt EXCLUDE_FROM_ALL)
 target_link_libraries(<target> PRIVATE pfp_rlbwt)
 ```
 
-A text T consists of symbols of 1 to 8 bytes (`uint8_t`, `uint16_t`, `uint24_t`, `uint32_t`, `uint40_t`, `uint48_t`, `uint56_t`, `uint64_t`; the packed types are those of string-utils, `misc/packed_integers.hpp`); every symbol has to be at least `pfp_rlbwt::min_symbol` (2). `pfp_rlbwt::build` reads it from a `text_source`: a `file_source<sym_t>` (a file with `sizeof(sym_t)` bytes per symbol, little endian, optionally reversed and, for one-byte symbols, with its bytes mapped), a `memory_source<sym_t>` (optionally reversed) or a class derived from `text_source<sym_t>`. It writes the BWT of T$, where $ is the symbol 0, to files with a given prefix; n = |T$| below.
+A text T consists of symbols of 1 to 8 bytes (`uint8_t`, `uint16_t`, `uint24_t`, `uint32_t`, `uint40_t`, `uint48_t`, `uint56_t`, `uint64_t`; the packed types are those of string-utils, `misc/packed_integers.hpp`); every symbol has to be at least `pfp_rlbwt::min_symbol` (2). `pfp_rlbwt::build` reads it from a `text_source`: a `file_source<sym_t>` (a file with `sizeof(sym_t)` bytes per symbol, little endian, optionally reversed and, for one-byte symbols, with its bytes mapped), a `memory_source<sym_t>` (optionally reversed) or a class derived from `text_source<sym_t>`. It writes the BWT of T$, where $ is the symbol 0, to files with a given prefix; n = |T$| below. The text sources, the output files and their readers come from [string-utils](https://github.com/LukasNalbach/string-utils) (`rlbwt/`); `pfp_rlbwt/types.hpp` makes them available in the namespace `pfp_rlbwt`.
 
 | File | Content |
 | --- | --- |
@@ -40,7 +40,7 @@ A text T consists of symbols of 1 to 8 bytes (`uint8_t`, `uint16_t`, `uint24_t`,
 | `<prefix>.sa` | the suffix array (`byte_width(n)` bytes per value, little endian), if `write_sa` is set |
 | `<prefix>.lcp` | the LCP array (`byte_width(n)` bytes per value, little endian), if `write_lcp` is set |
 
-`byte_width(x)` is the fewest whole bytes that hold x. All values are stored little endian, bit-packed data least significant bit of a byte first. Which sections a runs file stores tells its format. Both formats store `section_fields`: the numbers that describe the file (`pfp_rlbwt::run_data_fields`, 64-bit integers): n, the number of runs r, the largest run symbol, the largest run length, whether SA and LCP samples are stored, the number of runs per block, and the widths of the fields of the format.
+`byte_width(x)` is the fewest whole bytes that hold x. All values are stored little endian, bit-packed data least significant bit of a byte first. Which sections a runs file stores tells its format. Both formats store `section_fields`: the numbers that describe the file (`pfp_rlbwt::run_data_fields`, 64-bit integers): n, the number of runs r, the largest run symbol, the largest run length, whether SA and LCP samples are stored, the number of runs per block, the number of LCP values per LCP block, and the widths of the fields of the format.
 
 ### The Plain Format (default)
 
@@ -59,19 +59,23 @@ The records start at offset 0 of the file, and their layout depends only on n, t
 | --- | --- |
 | `section_sa_run_starts`, `section_sa_run_ends` | the SA values at the starts and at the ends of the runs, bit-packed with `bit_width(n)` bits each, if `write_sa_samples` is set |
 | `section_run_blocks` | the runs in blocks of `runs_per_block` runs: the starts relative to the first start of the block Elias-Fano coded, then the symbols coded with a canonical Huffman code, with the offset of every `runs_per_symbol_sample`-th code (see `pfp_rlbwt::run_block`) |
-| `section_lcp_blocks` | the LCP values at the starts of the runs in blocks of `runs_per_block` values, coded with RLE-GEF, the run-length variant of Generalized Elias-Fano [2]: the values minus their minimum are split into low parts (the `split` low bits) and high parts, and the high part is stored once per run of equal high parts; `split` minimizes the size of the block (see `pfp_rlbwt::lcp_block`); if `write_lcp_samples` is set |
+| `section_lcp_blocks` | the LCP values at the starts of the runs in blocks of `lcp_values_per_block` values, coded with RLE-GEF, the run-length variant of Generalized Elias-Fano [2]: the values minus their minimum are split into low parts (the `split` low bits) and high parts, and the high part is stored once per run of equal high parts; `split` minimizes the size of the block (see `pfp_rlbwt::lcp_block`); if `write_lcp_samples` is set |
 | `section_run_block_index` | for each block of runs its offset in `section_run_blocks` and the start of its first run, bit-packed |
 | `section_lcp_block_index` | for each LCP block its offset in `section_lcp_blocks`, bit-packed |
 | `section_symbol_code` | the canonical Huffman code of the run symbols: the largest code length L, the number of codes of each length 1..L (64 bits each) and the symbols in the order of their codes (`sizeof(sym_t)` bytes each) |
 | `section_fields`, from `first_extra_section` on | see above |
 
-A reader keeps the block indexes and the code in RAM (about (2 log2 n) / `runs_per_block` bits per run, plus the code). Each block starts at a byte, so a random access reads one range of the file: the run i, its length and the run containing a BWT position read one block of runs, an SA value reads its bytes, and an LCP value reads one LCP block; each is one disk read (`pread` with `O_DIRECT`).
+A reader keeps the block indexes and the code in RAM (about (2 log2 n) / `runs_per_block` + (log2 n) / `lcp_values_per_block` bits per run, plus the code). Each block starts at a byte, so a random access reads one range of the file: the run i, its length and the run containing a BWT position read one block of runs, an SA value reads its bytes, and an LCP value reads one LCP block; each is one disk read (`pread` with `O_DIRECT`).
 
-The coding of the LCP values follows GEF [2] (RLE_GEF; licensed under the Apache License 2.0), but pfp-rlbwt contains none of its code: GEF stores a sequence in partitions of 32000 values whose serialized layout (sdsl-lite vectors and rank directories without an index of the partition offsets) cannot be read with O(1) disk reads per value, so the coding is implemented anew in blocks of `runs_per_block` values that are read with one disk read (the rank within a block is computed with popcounts, so no rank directory is stored). The Apache License 2.0 allows such use from MIT-licensed code; including GEF's code would require keeping its license and notices for those files.
+The coding of the LCP values follows GEF [2] (RLE_GEF; licensed under the Apache License 2.0), but pfp-rlbwt contains none of its code: GEF stores a sequence in partitions of 32000 values whose serialized layout (sdsl-lite vectors and rank directories without an index of the partition offsets) cannot be read with O(1) disk reads per value, so the coding is implemented anew in blocks of `lcp_values_per_block` values that are read with one disk read (the rank within a block is computed with popcounts, so no rank directory is stored). The Apache License 2.0 allows such use from MIT-licensed code; including GEF's code would require keeping its license and notices for those files.
 
-While it runs, `build` stores the suffix array of the dictionary temporarily in `<prefix>.dsa`, the ends of the phrase runs and the symbols before their next phrases in `<prefix>.run-ends` and `<prefix>.run-symbols`, and the inverse suffix array of the parse in `<prefix>.isa`, so that they are not held in RAM while they are not needed; with the compressed format, it writes the records of the plain format to `<prefix>.bwt-runs.records` and the LCP blocks to `<prefix>.bwt-runs.<identifier>` and computes the compressed format from them with `num_threads` threads.
+While it runs, `build` stores the suffix array of the dictionary temporarily in `<prefix>.dsa`, the ends of the phrase runs in `<prefix>.run-ends`, and the inverse suffix array of the parse in `<prefix>.isa`, so that they are not held in RAM while they are not needed; with the compressed format, it writes the records of the plain format to `<prefix>.bwt-runs.records` and the LCP blocks to `<prefix>.bwt-runs.<identifier>` and computes the compressed format from them with `num_threads` threads.
 
-### Readers (`#include <pfp_rlbwt/output/readers.hpp>`)
+### Recursive Prefix-Free Parsing
+
+With `recursive` (the default), the parse P of the phrase runs (consecutive equal phrases form one phrase run; P has one symbol per phrase run, which identifies its word) is suffix-sorted with the prefix-free parsing of P (with `recursion_window` and `recursion_modulus`), as Oliva et al. [6] proposed: the next level computes the run-length encoded BWT of P and its SA values at the starts and at the ends of the runs (or, if the full SA or LCP array is written, the full SA of P), from which the first level obtains the order of the phrases and the text positions it needs, and the next level is recursive itself. A parse is parsed if it has at least `recursion_min_phrase_runs` phrase runs and at most half as many as the text has symbols; if the prefix-free parsing of P is larger than half of P, P is suffix-sorted with a suffix array construction, as with `recursive` off. So the number of levels depends on the text. The next level reads P from the phrase runs the parsing threads have found (P is not stored), and keeps its temporary arrays in RAM. This is faster and needs less memory if P is large and repetitive. In both cases, Psi of the suffix array of P (the rank of the suffix of P one phrase run later) is stored as a move data structure [4, 5] over the runs of the BWT of P, whose rows also store the word and the length of the phrase runs.
+
+### Readers (`#include <rlbwt/readers.hpp>`)
 
 `run_data_file` opens a runs file: its table of contents, its fields and the parts readers keep in RAM. All readers return a run as `run_record` (start, length, symbol, the SA values at its start and at its end, the LCP value at its start; 0 for values the file does not store) or `run_head` (start and symbol).
 
@@ -91,8 +95,12 @@ While it runs, `build` stores the suffix array of the dictionary temporarily in 
 | `format` | `plain` | the format of `<prefix>.bwt-runs` (`file_format::plain` or `file_format::compressed`) |
 | `runs_per_block` | 1024 | runs per block (compressed) or per record sample (plain); a multiple of 8 |
 | `runs_per_symbol_sample` | 64 | runs per sample of the symbol codes in a block (compressed), 1 to `runs_per_block` |
+| `lcp_values_per_block` | 256 | LCP values per LCP block (compressed); positive |
 | `write_sa_samples`, `write_lcp_samples` | false | store the SA values at the starts and at the ends of the runs, the LCP values at the starts of the runs |
 | `write_bwt`, `write_sa`, `write_lcp` | false | write `<prefix>.bwt`, `<prefix>.sa`, `<prefix>.lcp` |
+| `recursive` | true | suffix-sort the parse with its prefix-free parsing (see above) |
+| `recursion_window`, `recursion_modulus` | 6, 20 | `window` and `modulus` of the prefix-free parsings of the parses |
+| `recursion_min_phrase_runs` | 2^20 | the fewest phrase runs of a parse that is parsed |
 | `extra_sections` | empty | further sections of `<prefix>.bwt-runs`: an identifier (at least `first_extra_section`, distinct) and a function that writes the bytes to a `std::ostream` |
 | `log` | false | print the phases and their running times |
 
@@ -100,8 +108,8 @@ While it runs, `build` stores the suffix array of the dictionary temporarily in 
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <pfp_rlbwt/output/readers.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
+#include <rlbwt/readers.hpp>
 
 int main()
 {
@@ -151,8 +159,8 @@ The same text in the compressed format, read in RAM in this format:
 ```cpp
 #include <iostream>
 #include <string>
-#include <pfp_rlbwt/output/readers.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
+#include <rlbwt/readers.hpp>
 
 int main()
 {
@@ -238,17 +246,19 @@ int main()
 }
 ```
 
+`pfp_rlbwt::fasta_ranges<chunk_t>` reads the FASTA file only once, while it is parsed (`pfp_rlbwt::build(ranges, prefix, prm)` with a `text_ranges<uint8_t>`): the file is split into one range per thread, each starting at a line whose state of the transformation is known, and each thread scans its range while it parses it (`fasta_range_reader`). After the parse, the ranges are merged into the length, the byte frequencies and the samples of the text (`scan()`), `merge` receives the chunk of each range as with `scan_fasta_lines`, and the symbols are renamed by the map that `map_of` computes from the merged scan (distinct symbols of at least `min_symbol`, e.g. by frequency); the BWT is the one of the renamed text.
+
 ## Compressor
 
-**pfp-rlbwt-comp** stores a byte text as the run-length encoded BWT [3] of the text, with the run symbols and run lengths compressed by an arithmetic coder with context mixing, and restores the text in parallel with the move data structure [4, 5] for LF. The BWT is computed with `build` (the plain format with SA samples). The compressor needs the submodule [move-data-structure](https://github.com/LukasNalbach/move-data-structure), which CMake fetches only if `PFP_RLBWT_BUILD_COMP` (the library `pfp_rlbwt_comp`) or `PFP_RLBWT_BUILD_COMP_CLI` (the command-line tool) is `ON`; both are `ON` if pfp-rlbwt is the top-level project, and the tests of the compressor (`test-pfp-rlbwt-comp`) are built with the other tests if the library is.
+**pfp-rlbwt-comp** stores a byte text as the run-length encoded BWT [3] of the text, with the run symbols and run lengths compressed by an arithmetic coder with context mixing, and restores the text in parallel with the move data structure [4, 5] for LF. The BWT is computed with `build` (the plain format with SA samples). `PFP_RLBWT_BUILD_COMP` (the library `pfp_rlbwt_comp`) and `PFP_RLBWT_BUILD_COMP_CLI` (the command-line tool) turn the compressor on or off; both are `ON` if pfp-rlbwt is the top-level project, and the tests of the compressor (`test-pfp-rlbwt-comp`) are built with the other tests if the library is.
 
-**pfp-rlbwt-comp** compresses a file into `<input_file>.rlbwt` (`-fasta on|off|auto`: FASTA mode, see below; `auto`, the default, uses it for files that start with `>`). With `-d`, it restores the file into `<input_file>` without `.rlbwt`. `-t` sets the number of threads, `-o` the output file; `-h` prints all options.
+**pfp-rlbwt-comp** compresses a file into `<input_file>.rlbwt` (`-fasta on|off|auto`: FASTA mode, see below; `auto`, the default, uses it for files that start with `>`). With `-d`, it restores the file into `<input_file>` without `.rlbwt`. `-p` sets the number of threads, `-o` the output file; `-h` prints all options.
 
 ```shell
 # writes text.txt.rlbwt
-build/cli/pfp-rlbwt-comp -t 16 text.txt
+build/cli/pfp-rlbwt-comp -p 16 text.txt
 # restores text.txt into restored.txt
-build/cli/pfp-rlbwt-comp -d -t 16 -o restored.txt text.txt.rlbwt
+build/cli/pfp-rlbwt-comp -d -p 16 -o restored.txt text.txt.rlbwt
 ```
 
 ### FASTA Mode
@@ -257,9 +267,9 @@ With `-fasta on` (`comp::compress_params::fasta`), pfp-rlbwt-comp splits a FASTA
 
 ```shell
 # writes genomes.fa.rlbwt
-build/cli/pfp-rlbwt-comp -fasta on -t 16 genomes.fa
+build/cli/pfp-rlbwt-comp -fasta on -p 16 genomes.fa
 # restores genomes.fa into restored.fa
-build/cli/pfp-rlbwt-comp -d -t 16 -o restored.fa genomes.fa.rlbwt
+build/cli/pfp-rlbwt-comp -d -p 16 -o restored.fa genomes.fa.rlbwt
 ```
 
 - A line starting with `>` is a header line, every other line is a sequence line of the current record; lines before the first header line form a record without a header.
@@ -360,6 +370,8 @@ Algorithms for Molecular Biology 14, 2019.
 [4] Takaaki Nishimoto and Yasuo Tabei. Optimal-time queries on bwt-runs compressed indexes. In 48th International Colloquium on Automata, Languages, and Programming (ICALP), 2021. ([paper](https://arxiv.org/abs/2006.05104))
 
 [5] Nico Bertram, Johannes Fischer and Lukas Nalbach. Move-r: Optimizing the r-index. In Symposium on Experimental Algorithms (SEA), 2024. ([paper](https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.SEA.2024.1))
+
+[6] Marco Oliva, Travis Gagie and Christina Boucher. Recursive prefix-free parsing for building big BWTs. In Data Compression Conference (DCC), 2023.
 
 ## License
 

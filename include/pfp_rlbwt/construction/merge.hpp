@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -47,10 +48,10 @@
 #include <misc/memory.hpp>
 #include <omp.h>
 
-#include <pfp_rlbwt/construction/compressed_writer.hpp>
 #include <pfp_rlbwt/construction/suffix_arrays.hpp>
-#include <pfp_rlbwt/output/bits.hpp>
 #include <pfp_rlbwt/types.hpp>
+#include <rlbwt/bits.hpp>
+#include <rlbwt/compressed_writer.hpp>
 
 namespace pfp_rlbwt {
 
@@ -58,30 +59,75 @@ namespace pfp_rlbwt {
 constexpr uint64_t chunks_per_thread = 64;
 
 // number of chunks per thread that are computed but not yet written, at most
-constexpr uint64_t pending_chunks_per_thread = 4;
+constexpr uint64_t pending_chunks_per_thread = 16;
 
 /* a BWT position: the suffix of S starting there begins with the dictionary suffix
    dict.text[dict_pos..dict_pos+dict_suffix_len-1] of the phrase containing it (if back > 0, dict_pos lies in the word
    of that phrase), continues with the back symbols of the phrases after it in its phrase run (back = 0 for the last
    phrase of a run), and then with the suffix of the parse of the phrase runs whose rank is parse_rank (the one
-   starting at the next run) */
+   starting at the next run); rank is the rank of the suffix of the parse of the phrase runs that starts at the run of
+   the phrase, and parse_rank = psi[rank] */
 struct bwt_pos {
     uint64_t dict_pos;
     uint64_t dict_suffix_len;
     uint64_t parse_rank;
     uint64_t back;
+    uint64_t rank;
 };
 
-/* a parse suffix in bwt_merger::lcp_in_runs: it starts with rem symbols of copies of word after their first w symbols
-   (rem = 0: none), and continues with the suffix of the parse of the phrase runs of rank next */
+/* a suffix of S in the computation of an LCP value (see bwt_merger::lcp): it starts with the last rem symbols of a
+   phrase run of the word `word` (rem = 0: none) and continues with the suffix of the parse of the phrase runs of rank
+   next, which lies in the input interval x of Psi (see psi_mds) */
 struct run_walk {
     uint64_t word;
     uint64_t rem;
     uint64_t next;
+    uint64_t x;
+};
+
+/* the computation of the LCP value of two BWT positions with the same dictionary suffix (see bwt_merger::lcp): their
+   suffixes of S start with a common prefix of length l and continue with the suffixes u and v; index is the index of
+   the value among the LCP values of its chunk (see pending_lcps) */
+struct lcp_walk {
+    run_walk u, v;
+    uint64_t l;
+    uint64_t index;
+};
+
+// number of LCP walks a thread advances alternately (see bwt_merger::compute_lcps)
+constexpr uint64_t interleaved_lcp_walks = 8;
+
+// number of LCP values a thread collects before it computes their walks (see bwt_merger::compute_lcps)
+constexpr uint64_t pending_lcp_values = uint64_t { 1 } << 12;
+
+/* the LCP values at the starts of the runs first + 2, first + 3, ... of a chunk (see chunk_runs), whose walks are
+   computed together (see bwt_merger::compute_lcps); one per thread */
+struct pending_lcps {
+    uint64_t first = 0; // the index of values[0] among the LCP values of the chunk (value j belongs to run j + 2)
+    /* [0..size-1] values[i] = the LCP value first + i of the chunk or, while its walk is pending, the length of the
+       common prefix before the walk */
+    std::vector<uint64_t> values;
+    std::vector<lcp_walk> walks; // the pending walks
 };
 
 // the SA value and the LCP value at the start of a BWT run
 using run_start_values = std::pair<uint64_t, uint64_t>;
+
+/* the outputs of a level of the recursive prefix-free parsing (see build_level), which are kept in RAM instead of being
+   written to the runs file and to the suffix array file */
+struct level_output {
+    uint_array* sa = nullptr; // if not nullptr, receives SA[0..n] of T$ (with params::write_sa)
+    // if not empty, sa receives only SA[beg..end-1] for each range [beg, end) (sorted and disjoint), one after another
+    std::vector<std::pair<uint64_t, uint64_t>> sa_ranges;
+    // the records of the runs in the plain format: [0..r-1] record k = bytes [k * layout.bytes, (k+1) * layout.bytes)
+    no_init_vector<uint8_t> records;
+    record_layout layout; // the layout of the records
+    uint64_t r = 0; // the number of runs
+    /* if set, called with the sizes of the parsing once the text is not read any more, before the dictionary is built
+       (see parse); if it returns false, the level is not computed further (completed stays false) */
+    std::function<bool(const result&)> parsed;
+    bool completed = false; // true <=> the runs (and the suffix array) are computed
+};
 
 /* the PLCP array of T$ sampled at the SA values of the starts of the BWT runs: PLCP[x] = values[j] - (x - positions[j])
    for the largest positions[j] <= x (from one text position to the next, PLCP decreases by one unless the BWT
@@ -153,6 +199,18 @@ struct alignas(cache_line_bytes) chunk_runs {
     // the SA and LCP values of the same positions, position_bytes bytes per value (little endian), not yet written
     std::vector<uint8_t> full_sa, full_lcp;
     uint64_t full_pos; // BWT position of the first value in full_bwt, full_sa and full_lcp
+    // the pending LCP values of the thread computing the chunk (see bwt_merger::compute_chunk)
+    pending_lcps* lcps = nullptr;
+
+    // frees the memory of the data of the chunk
+    void release()
+    {
+        records = no_init_vector<uint8_t>();
+        run_starts = std::vector<run_start_values>();
+        full_bwt = std::vector<sym_t>();
+        full_sa = std::vector<uint8_t>();
+        full_lcp = std::vector<uint8_t>();
+    }
 
     // empties the chunk; the first BWT position of the chunk is start
     void clear(uint64_t start)
@@ -169,19 +227,24 @@ struct alignas(cache_line_bytes) chunk_runs {
     }
 };
 
-/* the ranks of the parse suffixes preceded by a word whose suffix belongs to a group of equal dictionary suffixes
-   that are not processed yet: psi[cur..end-1]; member is the index of the dictionary suffix in the group */
+/* the ranks of the parse suffixes after the phrase runs of a word whose suffix belongs to a group of equal dictionary
+   suffixes, which are not processed yet: psi[cur..end-1], where cur is the first rank of the input interval x of Psi
+   (see psi_mds), end the one of the input interval end_x, and next_rank = psi[cur]; member is the index of the
+   dictionary suffix in the group */
 template <typename idx_t>
 struct rank_range {
+    idx_t next_rank;
     idx_t cur;
     idx_t end;
+    idx_t x;
+    idx_t end_x;
     uint32_t member;
 };
 
-/* the suffixes of P (the parse of the phrases) that start with a word whose suffix belongs to a group of equal
+/* the suffixes of the parse of the phrases that start with a word whose suffix belongs to a group of equal
    dictionary suffixes with a repeated word: those with the offsets [cur..end-1] among the suffixes starting with
-   word; next_rank is the rank among the suffixes of P of the suffix one phrase after the one with offset cur; rw is
-   psa.find_repeated(word); member is the index of the dictionary suffix in the group */
+   word; next_rank is the rank among the suffixes of the parse of the phrases of the suffix one phrase after the one
+   with offset cur; rw is psa.find_repeated(word); member is the index of the dictionary suffix in the group */
 struct repeated_range {
     uint64_t cur;
     uint64_t end;
@@ -191,12 +254,47 @@ struct repeated_range {
     uint64_t member;
 };
 
-// the heaps of a thread (see bwt_merger::compute_chunk)
+/* the ranges of the words of a group of equal dictionary suffixes that have the same symbol before the suffix (see
+   bwt_merger::compute_chunk), as a heap in merge_heaps::plain[beg..beg+size-1] */
+struct symbol_class {
+    uint64_t beg;
+    uint64_t size;
+    uint64_t symbol;
+};
+
+// the heaps and the pending LCP values of a thread (see bwt_merger::compute_chunk)
 template <typename idx_t>
 struct merge_heaps {
-    std::vector<rank_range<idx_t>> plain;
-    std::vector<repeated_range> repeated;
+    std::vector<rank_range<idx_t>> plain; // the ranges of a group without repeated words
+    std::vector<symbol_class> classes; // the classes of these ranges (only if no full array is written)
+    std::vector<repeated_range> repeated; // the ranges of a group with a repeated word
+    pending_lcps lcps;
 };
+
+/**
+ * @brief moves the first element of a binary heap, whose key has increased, down to its place
+ * @param heap the heap, the smallest element first
+ * @param later later(a, b) = true <=> a is larger than b
+ */
+template <typename val_t, typename later_t>
+inline void sift_down_first(std::vector<val_t>& heap, later_t later)
+{
+    uint64_t q = 0;
+
+    while (true) {
+        uint64_t c = 2 * q + 1;
+        if (c >= heap.size()) break;
+        if (c + 1 < heap.size() && later(heap[c], heap[c + 1])) c++;
+        if (!later(heap[q], heap[c])) break;
+        std::swap(heap[q], heap[c]);
+        q = c;
+    }
+}
+
+/* number of dictionary suffixes ahead of the processed one whose words are fetched into the cache; the data of their
+   words and the symbols before them are fetched half as many ahead, the rows of Psi of their words a quarter as many
+   (see bwt_merger::compute_chunk) */
+constexpr uint64_t prefetched_suffixes = 16;
 
 // capacity of the heap of a thread above which the heap is freed after a group of equal dictionary suffixes
 constexpr uint64_t kept_heap_entries = uint64_t { 1 } << 12;
@@ -209,10 +307,11 @@ constexpr uint64_t kept_heap_entries = uint64_t { 1 } << 12;
  *        2. a single proper suffix of a word: all its positions have the symbol before the suffix in the word;
  *        3. a group of equal proper suffixes of several words: the ranks of the parse suffixes after the words are
  *           merged with a heap (one run if all the words have the same symbol before the suffix and no full arrays
- *           are written).
+ *           are written; without full arrays, the words with the same symbol before the suffix are merged as one
+ *           class, which takes all its ranks up to the next rank of another class at once).
  *        The phrases of a word with a phrase run of two or more phrases (a repeated word) are ordered by the
- *        suffixes of P (the parse of the phrases) starting at them (see repeated_word_ranks); for a group with such
- *        a word, the ranks of the suffixes of P after the phrases are merged.
+ *        suffixes of the parse of the phrases starting at them (see repeated_word_ranks); for a group with such a
+ *        word, the ranks of these suffixes after the phrases are merged.
  */
 template <typename sym_t, typename idx_t>
 class bwt_merger {
@@ -244,8 +343,9 @@ public:
     const bool has_repeated; // true <=> a word is repeated (see psa.repeated)
 
 private:
-    // the files of the full BWT, SA and LCP array (nullptr if not written)
-    std::unique_ptr<parallel_output_file> bwt_file, sa_file, lcp_file;
+    /* the files of the full BWT, SA and LCP array (nullptr if not written); the SA is written to RAM on the levels
+       after the first (see level_output) */
+    std::unique_ptr<positioned_output> bwt_file, sa_file, lcp_file;
 
     // ############################# INTERNAL METHODS #############################
 
@@ -265,13 +365,13 @@ private:
             [&](uint64_t i) { return sa(first.dict_suffix_len, psa.psi[ranks + i]); });
     }
 
-    /* returns the BWT position with the dictionary suffix dict.text[x..x+len-1] whose phrase starts the suffix of P
-       with offset q among those starting with word s (rw = psa.find_repeated(s)) */
+    /* returns the BWT position with the dictionary suffix dict.text[x..x+len-1] whose phrase starts the suffix of the
+       parse of the phrases with offset q among those starting with word s (rw = psa.find_repeated(s)) */
     inline bwt_pos position(uint64_t x, uint64_t len, uint64_t s, const repeated_word_ranks* rw, uint64_t q) const
     {
-        if (rw == nullptr) return { x, len, psa.psi[psa.C[s + 1] + q], 0 };
+        if (rw == nullptr) return { x, len, psa.psi[psa.C[s + 1] + q], 0, psa.C[s + 1] + q };
         const auto [run, j] = rw->run_of(q);
-        return { x, len, psa.psi[rw->first_run + run], (j - 1) * rw->advance };
+        return { x, len, psa.psi[rw->first_run + run], (j - 1) * rw->advance, rw->first_run + run };
     }
 
     // appends the BWT positions of the full word s at x of length len, a repeated word, to out
@@ -285,22 +385,30 @@ private:
     [[gnu::noinline]] void append_repeated_group(chunk_runs<sym_t>& out, const idx_t* group, uint64_t num,
         uint64_t len, std::vector<repeated_range>& heap) const;
 
-    /* returns the LCP value of two BWT positions whose common prefix has length l up to the parse suffixes a and b
-       (see run_walk) */
-    [[gnu::noinline]] uint64_t lcp_in_runs(uint64_t l, run_walk a, run_walk b) const;
-
     // writes the buffered part of the full BWT, SA and LCP array of out
     void write_full(chunk_runs<sym_t>& out) const;
 
     // appends the record of the last run of out, whose SA value at its end is sa_end, to out.records
     void append_record(chunk_runs<sym_t>& out, uint64_t sa_end) const;
 
+    /* compares the dictionary suffixes of two BWT positions a and b; returns false if they determine the LCP value
+       (wk.l), else true and the walks after them in wk */
+    inline bool start_lcp(const bwt_pos& a, const bwt_pos& b, lcp_walk& wk) const;
+
+    /* advances the walks of wk by one phrase run (their input intervals x have to be set); returns true if wk.l is the
+       LCP value */
+    inline bool step_lcp(lcp_walk& wk) const;
+
+    /* computes the pending LCP values of out (their walks alternately) and stores them in the records and the run
+       starts of out and in out.last_lcp; the value of the last run stays pending until the record of the run exists */
+    void compute_lcps(chunk_runs<sym_t>& out) const;
+
 public:
     // ############################# CONSTRUCTORS #############################
 
     bwt_merger(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const parse_sa<idx_t>& psa,
         const phrase_arrays<idx_t, sym_t>& arr, const params& prm, const std::string& prefix,
-        bool writes_run_data, bool collects_run_starts, const sampled_plcp* plcp)
+        bool writes_run_data, bool collects_run_starts, const sampled_plcp* plcp, level_output* level_out)
         : n(prs.n), w(prs.w), J(prs.num_phrase_runs), dict(prs.dict), dsa(dsa), psa(psa), arr(arr), prm(prm),
           position_bytes(byte_width(prs.n + 1)),
           layout(position_bytes, sizeof(sym_t), prm.write_sa_samples, prm.write_lcp_samples),
@@ -310,35 +418,57 @@ public:
           plcp(plcp), has_repeated(!psa.repeated.empty())
     {
         if (prm.write_bwt) bwt_file = std::make_unique<parallel_output_file>(prefix + ext_bwt);
-        if (prm.write_sa) sa_file = std::make_unique<parallel_output_file>(prefix + ext_sa);
+
+        if (prm.write_sa) {
+            if (level_out != nullptr && level_out->sa != nullptr && !level_out->sa_ranges.empty()) {
+                sa_file = std::make_unique<ranges_output>(*level_out->sa, position_bytes, level_out->sa_ranges);
+            } else if (level_out != nullptr && level_out->sa != nullptr) {
+                sa_file = std::make_unique<array_output>(*level_out->sa, position_bytes);
+            } else {
+                sa_file = std::make_unique<parallel_output_file>(prefix + ext_sa);
+            }
+        }
+
         if (plcp != nullptr) lcp_file = std::make_unique<parallel_output_file>(prefix + ext_lcp);
     }
 
     // writes the rest of the full BWT, SA and LCP array and closes their files (see parallel_output_file::close)
     void close_full_files()
     {
-        for (std::unique_ptr<parallel_output_file>* f : { &bwt_file, &sa_file, &lcp_file }) {
+        for (std::unique_ptr<positioned_output>* f : { &bwt_file, &sa_file, &lcp_file }) {
             if (*f != nullptr) (*f)->close();
         }
     }
 
     // ############################# ACCESS METHODS #############################
 
-    /* returns the SA value (in T$) of the position with dictionary suffix length len, parse suffix rank j and back
-       (see bwt_pos) */
-    inline uint64_t sa(uint64_t len, uint64_t j, uint64_t back = 0) const
+    /* returns the SA value (in T$) of a position whose phrase run ends at end, with dictionary suffix length len and
+       back (see bwt_pos) */
+    inline uint64_t sa_of_end(uint64_t end, uint64_t len, uint64_t back) const
     {
-        const uint64_t x = arr.ends_by_rank[j] + 1 - len - back; // position in S
+        const uint64_t x = end + 1 - len - back; // position in S
         return x == 0 ? n : x - 1;
     }
 
-    inline uint64_t sa(const bwt_pos& b) const { return sa(b.dict_suffix_len, b.parse_rank, b.back); }
+    /* returns the SA value (in T$) of the position with dictionary suffix length len and parse suffix rank j (see
+       bwt_pos), with the ends of the phrase runs by rank (not sampled) */
+    inline uint64_t sa(uint64_t len, uint64_t j) const { return sa_of_end(arr.ends_by_rank[j], len, 0); }
 
-    // returns the BWT symbol of the full-word position whose parse suffix has rank j
-    inline sym_t symbol_before_full_word(uint64_t j) const { return bwt_symbol<sym_t>(arr.symbols_by_rank[j]); }
+    // returns the SA value (in T$) of the BWT position b
+    inline uint64_t sa(const bwt_pos& b) const
+    {
+        if (psa.ends.empty()) return sa_of_end(arr.ends_by_rank[b.parse_rank], b.dict_suffix_len, b.back);
+        return sa_of_end(psa.ends.end_at(psa.bwt_runs, b.rank, b.parse_rank, psa.psi), b.dict_suffix_len, b.back);
+    }
 
-    // returns the BWT symbol before the phrase run starting the parse suffix of rank x >= 1
-    inline sym_t symbol_before_run_of_rank(uint64_t x) const { return symbol_before_full_word(psa.psi[x]); }
+    /* returns the BWT symbol before the phrase run starting the parse suffix of rank y >= 1 (the symbol of a full-word
+       position whose parse suffix has rank psi[y]): the symbol before the last w symbols of the word of the phrase run
+       before it, whose value is at position y of the BWT of the parse of the phrase runs (see symbols_of_values) */
+    inline sym_t symbol_at_rank(uint64_t y) const { return run_symbol(psa.bwt_runs.run_of(y)); }
+
+    /* returns the BWT symbol before the phrase runs starting the parse suffixes of the ranks in run k of the BWT of the
+       parse of the phrase runs */
+    inline sym_t run_symbol(uint64_t k) const { return bwt_symbol<sym_t>(arr.value_symbols[psa.bwt_run_values[k]]); }
 
     // returns the length of the common prefix of the words s1 != s2 after their first w symbols
     inline uint64_t words_lcp(uint64_t s1, uint64_t s2) const
@@ -386,7 +516,8 @@ private:
     const bool compressed; // true <=> the runs file is written in the compressed format
     // where the values at the starts of the runs are appended (nullptr: they are not collected)
     std::vector<run_start_values>* run_starts;
-    direct_ofstream file; // the file of the records (not opened if the runs file is not written)
+    direct_ofstream file; // the file of the records (not opened if the runs file is not written or kept in RAM)
+    no_init_vector<uint8_t>* memory_records = nullptr; // if not nullptr, receives the records instead of file
     std::string file_name; // name of the runs file
     std::string records_name; // name of the file of the records
     uint64_t pos = 0; // BWT position of the first position of the next chunk
@@ -415,11 +546,19 @@ private:
     // returns the fields of the runs file
     run_data_fields fields() const;
 
+    // appends records to the file of the records or to memory_records
+    void write_records(const uint8_t* data, uint64_t size)
+    {
+        if (memory_records != nullptr) memory_records->insert(memory_records->end(), data, data + size);
+        else file.write((const char*) data, size);
+    }
+
 public:
     // ############################# CONSTRUCTORS #############################
 
+    // keeps the records in RAM if level_out is not nullptr (only in the plain format; finish writes no other sections)
     output_writer(const bwt_merger<sym_t, idx_t>& m, const std::string& prefix,
-        std::vector<run_start_values>* run_starts);
+        std::vector<run_start_values>* run_starts, level_output* level_out);
 
     ~output_writer();
 
@@ -442,18 +581,20 @@ public:
  * @param prs the parsing (n, w, J and the dictionary)
  * @param dsa the generalized suffix array of the dictionary
  * @param psa the suffix array of the parsing
- * @param arr the phrase runs (ends_by_rank and symbols_by_rank)
+ * @param arr the phrase runs (ends_by_rank and value_symbols)
  * @param prm parameters
  * @param prefix path prefix of the output files
  * @param writes_run_data true <=> the runs file is written (see ext_runs)
  * @param run_starts if not nullptr, the SA and LCP values at the starts of the runs are appended to it
  * @param plcp if not nullptr, the full LCP array is written, computed with this sampled PLCP array
+ * @param level_out if not nullptr, receives the records and the suffix array instead of their files (see level_output)
  * @return the number r of runs
  */
 template <typename sym_t, typename idx_t>
 uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const parse_sa<idx_t>& psa,
     const phrase_arrays<idx_t, sym_t>& arr, const params& prm, const std::string& prefix, bool writes_run_data,
-    std::vector<run_start_values>* run_starts = nullptr, const sampled_plcp* plcp = nullptr);
+    std::vector<run_start_values>* run_starts = nullptr, const sampled_plcp* plcp = nullptr,
+    level_output* level_out = nullptr);
 
 } // namespace pfp_rlbwt
 

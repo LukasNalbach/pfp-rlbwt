@@ -82,9 +82,10 @@ inline no_init_vector<uint8_t> read_file(const std::string& path)
 /**
  * @brief writes bytes that are reported from right to left to consecutive positions of a file with O_DIRECT (see
  *        direct_positioned_file), through a buffer that holds a window of the file starting at a multiple of the sector
- *        size; writers of disjoint ranges of the file can be used by different threads
+ *        size; writers of disjoint ranges of the file can be used by different threads (each writer is aligned to a
+ *        cache line)
  */
-class backward_writer {
+class alignas(cache_line_bytes) backward_writer {
 private:
     static constexpr uint64_t sector = direct_io_alignment;
 
@@ -94,22 +95,24 @@ private:
     uint64_t begin = 0; // [begin, end) are the buffered positions of the file
     uint64_t end = 0;
     char* buffer; // [0..window_bytes-1] the byte at position window + i is buffer[i] (aligned to sector)
+    phase_progress* prog; // counts the bytes written (nullptr: none)
 
 public:
     /**
      * @brief creates a writer
      * @param file the file
      * @param buffer_bytes the size of the buffer in bytes (rounded up to a multiple of the sector size)
+     * @param prog counts the bytes written (nullptr: none)
      */
-    backward_writer(direct_positioned_file& file, uint64_t buffer_bytes)
+    backward_writer(direct_positioned_file& file, uint64_t buffer_bytes, phase_progress* prog = nullptr)
         : file(&file), window_bytes(std::max<uint64_t>(1, div_ceil(buffer_bytes, sector)) * sector),
-          buffer(static_cast<char*>(allocate_aligned(window_bytes)))
+          buffer(static_cast<char*>(allocate_aligned(window_bytes))), prog(prog)
     {
     }
 
     backward_writer(backward_writer&& other) noexcept
         : file(other.file), window_bytes(other.window_bytes), window(other.window), begin(other.begin),
-          end(other.end), buffer(std::exchange(other.buffer, nullptr))
+          end(other.end), buffer(std::exchange(other.buffer, nullptr)), prog(other.prog)
     {
         other.begin = other.end;
     }
@@ -144,6 +147,7 @@ public:
     {
         if (begin == end) return;
         file->write(buffer + (begin - window), end - begin, begin);
+        if (prog != nullptr) prog->advance(end - begin);
         begin = end;
     }
 };
@@ -248,6 +252,7 @@ public:
 
         // decodes the blocks; I stores the length of each run
         std::atomic<uint64_t> next_block = 0;
+        phase_progress prog(params.log, r);
 
         run_on_threads(threads, [&](uint64_t, uint64_t) {
             for (uint64_t b = next_block++; b < num_blocks; b = next_block++) {
@@ -275,8 +280,11 @@ public:
                 }
 
                 block_size[b] = rows;
+                prog.advance(block_start(b + 1) - block_start(b));
             }
         });
+
+        prog.finish();
 
         // block_size[b] becomes the first BWT row of block b; LF(i) = C[c] + rank(L, c, i - 1) for the start i of a
         // run of c
@@ -426,9 +434,10 @@ public:
      *        each from right to left
      * @param num_threads the maximum number of threads
      * @param num_strands the number of strands per thread
+     * @param prog counts the bytes of the reverted pieces (nullptr: none)
      */
     template <typename report_fnc_t>
-    void revert(report_fnc_t report, uint64_t num_threads, uint64_t num_strands) const
+    void revert(report_fnc_t report, uint64_t num_threads, uint64_t num_strands, phase_progress* prog = nullptr) const
     {
         if (n == 0) return;
         const uint64_t pieces = num_pieces();
@@ -437,13 +446,18 @@ public:
         std::atomic<uint64_t> next = 0; // the next piece to take
 
         run_on_threads(threads, [&](uint64_t thread, uint64_t) {
-            revert_strands(k, [&](uint64_t, strand_t& st, bool) {
+            std::vector<uint64_t> length_of(k); // [0..k-1] the length of the piece of each strand
+
+            revert_strands(k, [&](uint64_t s, strand_t& st, bool) {
                 if (next.load(std::memory_order_relaxed) >= pieces) return false;
                 const uint64_t j = next.fetch_add(1, std::memory_order_relaxed);
                 if (j >= pieces) return false;
                 st = start_piece(j);
+                length_of[s] = st.t + 1 - st.first;
                 return true;
-            }, [&](uint64_t s, uint64_t i, uint8_t c) { report(thread * k + s, i, c); }, [](uint64_t) {});
+            }, [&](uint64_t s, uint64_t i, uint8_t c) { report(thread * k + s, i, c); }, [&](uint64_t s) {
+                if (prog != nullptr) prog->advance(length_of[s]);
+            });
         });
     }
 
@@ -454,9 +468,11 @@ public:
      * @param consume function called as consume(bytes, len) with each piece, by one thread at a time
      * @param num_threads the maximum number of threads
      * @param num_strands the number of strands per thread
+     * @param prog counts the bytes of the reverted pieces (nullptr: none)
      */
     template <typename consume_fnc_t>
-    void revert_in_order(consume_fnc_t consume, uint64_t num_threads, uint64_t num_strands) const
+    void revert_in_order(consume_fnc_t consume, uint64_t num_threads, uint64_t num_strands,
+        phase_progress* prog = nullptr) const
     {
         if (n == 0) return;
         const uint64_t pieces = num_pieces();
@@ -503,6 +519,7 @@ public:
                 }, [&](uint64_t s, uint64_t i, uint8_t c) {
                     bytes[s][i - first_of[s]] = c;
                 }, [&](uint64_t s) {
+                    if (prog != nullptr) prog->advance(bytes[s].size());
                     std::unique_lock<std::mutex> guard(lock);
                     reverted[piece_of[s]] = std::move(bytes[s]);
                     bytes[s] = no_init_vector<uint8_t>();
@@ -561,7 +578,10 @@ inline uint64_t decompress_into(const no_init_vector<uint8_t>& file, const decom
     auto time = now();
     log_phase_start(params.log, time, "reverting the BWT");
     fasta_restorer restorer(section, out);
-    text.revert_in_order([&](const char* bytes, uint64_t len) { restorer.append(bytes, len); }, p, params.num_strands);
+    phase_progress prog(params.log, text.size());
+    text.revert_in_order([&](const char* bytes, uint64_t len) { restorer.append(bytes, len); }, p, params.num_strands,
+        &prog);
+    prog.finish();
     restorer.finish();
     const uint64_t size = out.finish();
     log_phase_end(params.log, time);
@@ -580,15 +600,18 @@ inline uint64_t decompress(const std::string& input_file, const std::string& out
         auto time = now();
         log_phase_start(params.log, time, "reverting the BWT");
         direct_positioned_file output(output_file, n);
+        phase_progress prog(params.log, n);
 
         {
             // [0..p * k - 1] the writer of each strand; the strands of a thread share huge_page_bytes of buffers
             const uint64_t k = std::max<uint64_t>(1, params.num_strands);
             std::vector<backward_writer> writers;
             writers.reserve(p * k);
-            for (uint64_t w = 0; w < p * k; w++) writers.emplace_back(output, div_ceil(huge_page_bytes, k));
+            for (uint64_t w = 0; w < p * k; w++) writers.emplace_back(output, div_ceil(huge_page_bytes, k), &prog);
             text.revert([&](uint64_t w, uint64_t i, uint8_t c) { writers[w].put(i, c); }, p, k);
         }
+
+        prog.finish();
 
         if (!output.close_file()) throw std::runtime_error("cannot write " + output_file);
         log_phase_end(params.log, time);
@@ -606,7 +629,9 @@ inline std::string decompress(const std::string& input_file, const decompress_pa
         resize_no_init(result, text.size());
         auto time = now();
         log_phase_start(params.log, time, "reverting the BWT");
-        text.revert([&](uint64_t, uint64_t i, uint8_t c) { result[i] = char(c); }, p, params.num_strands);
+        phase_progress prog(params.log, text.size());
+        text.revert([&](uint64_t, uint64_t i, uint8_t c) { result[i] = char(c); }, p, params.num_strands, &prog);
+        prog.finish();
         log_phase_end(params.log, time);
         return text.size();
     }, out);

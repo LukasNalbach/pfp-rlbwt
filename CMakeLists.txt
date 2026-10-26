@@ -27,54 +27,62 @@ endif()
 # the libraries of string-utils beyond its core that are used here
 string_utils_add_components(libsais)
 
+# add external/move-data-structure, if the parent project has not added it (it uses the string-utils added above)
+if(NOT TARGET move_data_structure)
+  string_utils_fetch_submodules("${CMAKE_CURRENT_SOURCE_DIR}" PATHS external/move-data-structure)
+  add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/external/move-data-structure" EXCLUDE_FROM_ALL)
+endif()
+
 option(PFP_RLBWT_BUILD_CLI "Build pfp-rlbwt" ${PROJECT_IS_TOP_LEVEL})
 option(PFP_RLBWT_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
-# the compressor (library pfp_rlbwt_comp, CLI pfp-rlbwt-comp and its tests) needs external/move-data-structure, which
-# is downloaded only if one of them is built
 option(PFP_RLBWT_BUILD_COMP "Build the compressor library pfp_rlbwt_comp" ${PROJECT_IS_TOP_LEVEL})
 option(PFP_RLBWT_BUILD_COMP_CLI "Build pfp-rlbwt-comp" ${PROJECT_IS_TOP_LEVEL})
 
 # the libraries the instantiations are compiled and linked with
 set(pfp_rlbwt_dependencies libsais libsais40 libsais48 ips4o ips2ra sux sdsl_core OpenMP::OpenMP_CXX)
 
-# adds the object libraries <prefix>_<bytes> with the explicit instantiations (see the end of
-# include/pfp_rlbwt/pfp_rlbwt.hpp) for each symbol width in [1, 8] bytes and stores their objects in the variable
-# objects; they are compiled without the sources string-utils adds to its users (malloc_count), which belong to the
-# programs
+# adds the object library <target> of the source src/<source> with the definitions in ARGN; it is compiled without the
+# sources string-utils adds to its users (malloc_count), which belong to the programs
+function(pfp_rlbwt_add_object target source)
+  add_library(${target} OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/${source}")
+  target_compile_definitions(${target} PRIVATE ${ARGN}
+    $<TARGET_PROPERTY:string_utils,INTERFACE_COMPILE_DEFINITIONS>
+    $<TARGET_PROPERTY:malloc_count,INTERFACE_COMPILE_DEFINITIONS>
+    $<TARGET_PROPERTY:move_data_structure,INTERFACE_COMPILE_DEFINITIONS>)
+  target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+    $<TARGET_PROPERTY:string_utils,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:malloc_count,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:move_data_structure,INTERFACE_INCLUDE_DIRECTORIES>)
+  target_link_libraries(${target} PRIVATE ${pfp_rlbwt_dependencies})
+endfunction()
+
+# adds the object libraries <prefix>_<bytes> with the explicit instantiations (see src/instantiations.cpp) for each
+# symbol width in [1, 8] bytes and <prefix>_psi with the construction of Psi (see src/psi_mds.cpp), with the
+# definitions in ARGN, and stores their objects in the variable objects
 function(pfp_rlbwt_add_instantiations prefix objects)
   set(list "")
 
   foreach(bytes RANGE 1 8)
-    add_library(${prefix}_${bytes} OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/instantiations.cpp")
-    target_compile_definitions(${prefix}_${bytes} PRIVATE PFP_RLBWT_SYMBOL_BYTES=${bytes} ${ARGN}
-      $<TARGET_PROPERTY:string_utils,INTERFACE_COMPILE_DEFINITIONS>
-      $<TARGET_PROPERTY:malloc_count,INTERFACE_COMPILE_DEFINITIONS>)
-    target_include_directories(${prefix}_${bytes} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/"
-      $<TARGET_PROPERTY:string_utils,INTERFACE_INCLUDE_DIRECTORIES>
-      $<TARGET_PROPERTY:malloc_count,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_link_libraries(${prefix}_${bytes} PRIVATE ${pfp_rlbwt_dependencies})
+    pfp_rlbwt_add_object(${prefix}_${bytes} instantiations.cpp PFP_RLBWT_SYMBOL_BYTES=${bytes} ${ARGN})
     list(APPEND list $<TARGET_OBJECTS:${prefix}_${bytes}>)
   endforeach()
 
+  pfp_rlbwt_add_object(${prefix}_psi psi_mds.cpp ${ARGN})
+  list(APPEND list $<TARGET_OBJECTS:${prefix}_psi>)
   set(${objects} ${list} PARENT_SCOPE)
 endfunction()
 
 pfp_rlbwt_add_instantiations(pfp_rlbwt pfp_rlbwt_objects)
 add_library(pfp_rlbwt STATIC ${pfp_rlbwt_objects})
 target_include_directories(pfp_rlbwt PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include/")
-target_link_libraries(pfp_rlbwt PUBLIC libsais libsais40 libsais48 ips4o ips2ra OpenMP::OpenMP_CXX INTERFACE string_utils)
+target_link_libraries(pfp_rlbwt PUBLIC libsais libsais40 libsais48 ips4o ips2ra OpenMP::OpenMP_CXX
+  INTERFACE string_utils move_data_structure)
 
 if(PFP_RLBWT_BUILD_CLI)
   string_utils_add_executable(pfp-rlbwt cli/pfp-rlbwt.cpp "${CMAKE_BINARY_DIR}/cli/" pfp_rlbwt)
 endif()
 
 if(PFP_RLBWT_BUILD_COMP OR PFP_RLBWT_BUILD_COMP_CLI)
-  # add external/move-data-structure, if the parent project has not added it (it uses the string-utils added above)
-  if(NOT TARGET move_data_structure)
-    string_utils_fetch_submodules("${CMAKE_CURRENT_SOURCE_DIR}" PATHS external/move-data-structure)
-    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/external/move-data-structure" EXCLUDE_FROM_ALL)
-  endif()
-
   add_library(pfp_rlbwt_comp INTERFACE)
   target_link_libraries(pfp_rlbwt_comp INTERFACE pfp_rlbwt move_data_structure string_utils)
 endif()
@@ -96,7 +104,7 @@ if(PFP_RLBWT_BUILD_TESTS)
   set(pfp_rlbwt_wide_definitions PFP_RLBWT_MAX_INDEX32=1024 PFP_RLBWT_MAX_INDEX40=4096)
   pfp_rlbwt_add_instantiations(pfp_rlbwt_wide pfp_rlbwt_wide_objects ${pfp_rlbwt_wide_definitions})
   string_utils_add_executable(test-pfp-rlbwt-wide tests/test-pfp-rlbwt.cpp "${CMAKE_BINARY_DIR}/tests/" string_utils_test
-    gtl ${pfp_rlbwt_dependencies})
+    gtl move_data_structure ${pfp_rlbwt_dependencies})
   target_sources(test-pfp-rlbwt-wide PRIVATE ${pfp_rlbwt_wide_objects})
   target_include_directories(test-pfp-rlbwt-wide PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include/")
   target_compile_definitions(test-pfp-rlbwt-wide PRIVATE ${pfp_rlbwt_wide_definitions})

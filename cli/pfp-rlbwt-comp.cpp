@@ -55,9 +55,8 @@ void compress(compressor_cli_t& cli)
 {
     const pfp_rlbwt::comp::byte_text text(cli.path_input_file);
     const uint64_t n = text.size();
-    log_out() << "compressing " << cli.path_input_file << (cli.fasta ? " as a FASTA file" : "") << " ("
-              << format_size(n) << ") into its RLBWT with " << format_threads(cli.threads) << std::endl;
-    log_out() << "output: " << cli.path_output_file << std::endl;
+    log_run_start("building the RLBWT of", cli.path_input_file, n, cli.threads, cli.fasta ? "fasta = on" : "",
+        cli.path_output_file);
 
     const uint64_t baseline = malloc_count_current();
     malloc_count_reset_peak();
@@ -67,18 +66,16 @@ void compress(compressor_cli_t& cli)
         { .num_threads = cli.threads, .fasta = cli.fasta, .log = cli.log });
     const uint64_t time_ns = time_diff_ns(time_start, now());
     const uint64_t peak = overall_peak() - baseline;
-    if (cli.fasta) log_out() << format_number(res.num_records) << " records" << std::endl;
+    if (cli.fasta) log_out() << "records = " << format_number(res.num_records) << ", ";
     log_out() << "n = " << format_number(res.sequence_length) << ", sigma = " << res.sigma << ", r = "
               << format_number(res.r) << ", n/r = "
               << format_ratio(double(res.sequence_length) / double(std::max<uint64_t>(1, res.r))) << std::endl;
-    log_out() << "compression time: " << format_time(time_ns) << " (" << format_throughput(n, time_ns) << ")"
-              << std::endl;
-    if constexpr (is_malloc_count_linked) log_peak_memory_usage("peak memory usage", peak, n);
+    log_construction_summary(time_ns, n, is_malloc_count_linked ? peak : peak_not_measured);
     log_compression_ratio(res.file_bytes, n);
 
     if (cli.measurement_file.is_open()) {
         result_line(cli.measurement_file)
-            ("type", "pfp-rlbwt-compress")
+            ("algo", "compress_pfp_rlbwt")
             ("text", cli.text_name)
             ("n", res.n)
             ("fasta", cli.fasta)
@@ -95,7 +92,7 @@ void compress(compressor_cli_t& cli)
             ("size_lengths", res.length_bytes)
             ("size_fasta_headers", res.fasta_header_bytes)
             ("size_fasta_layout", res.fasta_layout_bytes)
-            ("size_file", res.file_bytes)
+            ("size_output", res.file_bytes)
             ("time_compress", time_ns)
             ("peak_memory_usage", peak);
     }
@@ -104,8 +101,8 @@ void compress(compressor_cli_t& cli)
 // restores the text of the input file into the output file
 void decompress(compressor_cli_t& cli)
 {
-    log_out() << "decompressing " << cli.path_input_file << " with " << format_threads(cli.threads) << std::endl;
-    log_out() << "output: " << cli.path_output_file << std::endl;
+    log_run_start("decompressing", cli.path_input_file, std::filesystem::file_size(cli.path_input_file), cli.threads,
+        "", cli.path_output_file);
 
     const uint64_t baseline = malloc_count_current();
     malloc_count_reset_peak();
@@ -121,7 +118,7 @@ void decompress(compressor_cli_t& cli)
 
     if (cli.measurement_file.is_open()) {
         result_line(cli.measurement_file)
-            ("type", "pfp-rlbwt-decompress")
+            ("algo", "decompress_pfp_rlbwt")
             ("text", cli.text_name)
             ("n", n)
             ("num_threads", cli.threads)
@@ -134,6 +131,6 @@ void decompress(compressor_cli_t& cli)
 
 int main(int argc, char** argv)
 {
-    return run_compressor_cli(argc, argv, spec, [](help_printer&) {},
+    return run_compressor_cli(argc, argv, spec, [](help_printer&, compressor_help_part) {},
         [](const std::string&, cli_arguments&) { return false; }, compress, decompress);
 }
