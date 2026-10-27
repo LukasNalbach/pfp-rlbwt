@@ -47,11 +47,12 @@
 #include <misc/memory.hpp>
 #include <misc/threads.hpp>
 #include <pfp_rlbwt/types.hpp>
+#include <rlbwt/byte_map.hpp>
 
 namespace pfp_rlbwt::comp {
 
 // [0..255] occurs[c] = whether the byte c occurs in the text
-using byte_set = std::array<bool, num_byte_values>;
+using rlbwt::byte_set;
 
 /**
  * @brief a byte text T[0..n-1], stored in a file or in memory

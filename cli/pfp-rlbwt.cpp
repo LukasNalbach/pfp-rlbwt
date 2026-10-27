@@ -32,11 +32,10 @@
 
 #include <omp.h>
 
-#include <array>
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -46,7 +45,9 @@
 #include <misc/files.hpp>
 #include <misc/log.hpp>
 #include <misc/measurement.hpp>
+#include <pfp_rlbwt/fasta.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
+#include <rlbwt/byte_file.hpp>
 
 namespace {
 
@@ -57,8 +58,10 @@ struct pfp_rlbwt_cli_t {
     std::string text_name; // <name> of -m
     uint64_t p = omp_get_max_threads(); // -p
     uint64_t symbol_bytes = 1; // -symbol-bytes: bytes per symbol of the input file
+    fasta_option fasta = fasta_option::detect; // -fasta
+    bool fasta_mode = false; // whether the input file is read in the FASTA mode (see run)
+    std::string fasta_alphabet = std::string(fasta_default_alphabet); // -A
     bool reverse = false; // -rev
-    bool map_bytes = false; // -map
     pfp_rlbwt::params params; // the parameters of the construction
     direct_ofstream measurement_file; // -m
 } cli;
@@ -79,14 +82,18 @@ void print_help(std::ostream& out)
         "the LCP array with one value per position.",
         "pfp-rlbwt [options] <input_file>");
     h.group("arguments");
-    h.option("<input_file>", "", "the text");
+    h.option("<input_file>", "", "the text; in the FASTA mode a FASTA file");
     h.group("input");
     h.option("-symbol-bytes <b>", "integer in [1, " + std::to_string(sizeof(uint64_t)) + "] (default: 1)",
-        "the number of bytes per symbol of the input file (little endian); every symbol has to be at least "
-        + min_symbol_str);
-    h.option("-map", "", "map the bytes of the input file to " + min_symbol_str + ", " + std::to_string(min_symbol + 1)
-        + ", ... in increasing order (for a file that contains smaller bytes; only with -symbol-bytes 1); the BWT "
-        "consists of the mapped bytes");
+        "the number of bytes per symbol of the input file (little endian); with more than 1, every symbol has to be "
+        "at least " + min_symbol_str + "; with 1, if a byte below " + min_symbol_str + " occurs, the distinct bytes "
+        "are mapped to " + min_symbol_str + ", " + std::to_string(min_symbol + 1) + ", ... in increasing order (to "
+        "16-bit symbols if more than " + std::to_string(num_byte_values - min_symbol) + " distinct bytes occur), the "
+        "BWT consists of the mapped bytes and <base_name>" + ext_runs + " stores the map (see the README)");
+    h.option_fasta("FASTA mode (only with -symbol-bytes 1): replace each header line and each run of symbols outside "
+        "the alphabet of -A (after upper-casing) with one separator symbol, skip the lines before the first header and "
+        "drop carriage returns");
+    h.option_fasta_alphabet();
     h.option("-rev", "", "compute the output for the reversed file");
     h.group("parsing");
     h.option("-w <w>", "integer >= 1 (default: " + std::to_string(defaults.window) + ")",
@@ -115,8 +122,8 @@ void print_help(std::ostream& out)
     h.option("-sa", "", std::string("also write the SA values at the starts and at the ends of the runs to <base_name>")
         + ext_runs);
     h.option("-lcp", "", std::string("also write the LCP values at the starts of the runs to <base_name>") + ext_runs);
-    h.option("-full-bwt", "", std::string("write <base_name>") + ext_bwt + " (the BWT, one symbol of the input width "
-        "per position)");
+    h.option("-full-bwt", "", std::string("write <base_name>") + ext_bwt + " (the BWT, one symbol per position, with "
+        "the bytes per symbol of the input or of the mapped bytes)");
     h.option("-full-sa", "", std::string("write <base_name>") + ext_sa + " (the suffix array, the fewest bytes per "
         "value that hold n + 1)");
     h.option("-full-lcp", "", std::string("write <base_name>") + ext_lcp + " (the LCP array, the fewest bytes per value "
@@ -146,8 +153,10 @@ void read_arguments(int argc, char** argv)
             cli.p = args.integer(s, 1, omp_get_max_threads());
         } else if (s == "-symbol-bytes") {
             cli.symbol_bytes = args.integer(s, 1, sizeof(uint64_t));
-        } else if (s == "-map") {
-            cli.map_bytes = true;
+        } else if (s == "-fasta") {
+            cli.fasta = read_fasta_option(args);
+        } else if (s == "-A") {
+            cli.fasta_alphabet = args.value(s);
         } else if (s == "-rev") {
             cli.reverse = true;
         } else if (s == "-w") {
@@ -193,61 +202,40 @@ void read_arguments(int argc, char** argv)
     cli.path_input_file = args.next();
     if (!args.empty()) throw usage_error("expected exactly one <input_file>");
     if (cli.base_name.empty()) cli.base_name = cli.path_input_file;
-    if (cli.map_bytes && cli.symbol_bytes != 1) throw usage_error("-map needs -symbol-bytes 1");
+    if (cli.fasta == fasta_option::on && cli.symbol_bytes != 1) throw usage_error("-fasta on needs -symbol-bytes 1");
 }
 
-// returns the map of the bytes occurring in the input file to min_symbol, min_symbol + 1, ... in increasing order
-std::array<uint8_t, 256> byte_map()
+/* runs pfp_rlbwt::build on the text of the input file with one-byte symbols: a FASTA file is read once if it is not
+   read reversed and no symbol of its text can be below min_symbol; else the file is scanned first and the bytes of the
+   text are mapped if one is below min_symbol (see rlbwt::build_byte_file) */
+pfp_rlbwt::result build_bytes()
 {
-    const pfp_rlbwt::file_source<uint8_t> text(cli.path_input_file);
-    const uint64_t n = text.size();
-    const uint64_t p = cli.p;
-    const uint64_t blocks = (n + pfp_rlbwt::read_block_size - 1) / pfp_rlbwt::read_block_size;
-    // the bytes each thread has read: [0..p-1][0..255] seen[i_p][c] = 1 <=> thread i_p has read the byte c
-    std::vector<std::array<uint8_t, 256>> seen(p);
+    pfp_rlbwt::params& params = cli.params;
+    auto build_text = [&](auto&& text) { return pfp_rlbwt::build(text, cli.base_name, params); };
+    const pfp_rlbwt::fasta_transform transform(cli.fasta_alphabet); // the transformation of the FASTA mode
+    // whether a symbol of the text of the FASTA mode can be below min_symbol: the separator or a symbol of the alphabet
+    const bool small_symbol = transform.separator < pfp_rlbwt::min_symbol || std::any_of(transform.in_alphabet.begin(),
+        transform.in_alphabet.begin() + pfp_rlbwt::min_symbol, [](uint8_t in) { return in != 0; });
 
-    #pragma omp parallel num_threads(p)
-    {
-        std::array<uint8_t, 256>& seen_t = seen[omp_get_thread_num()];
-        const std::unique_ptr<pfp_rlbwt::text_source<uint8_t>::reader> reader = text.new_reader();
-        std::vector<uint8_t> buffer(pfp_rlbwt::read_block_size);
-
-        #pragma omp for schedule(dynamic)
-        for (uint64_t b = 0; b < blocks; b++) {
-            const uint64_t pos = b * pfp_rlbwt::read_block_size;
-            const uint64_t len = std::min(pfp_rlbwt::read_block_size, n - pos);
-            reader->read(pos, len, buffer.data());
-            for (uint64_t i = 0; i < len; i++) seen_t[buffer[i]] = 1;
-        }
+    if (cli.fasta_mode && !cli.reverse && !small_symbol) {
+        pfp_rlbwt::fasta_ranges<> text(cli.path_input_file, transform);
+        return build_text(text);
     }
 
-    /* the symbols the bytes are mapped to: [0..255] map[c] is the symbol the byte c is mapped to (min_symbol,
-       min_symbol + 1, ... in increasing order of the occurring bytes; 0 for bytes that do not occur) */
-    std::array<uint8_t, 256> map {};
-    uint64_t next = pfp_rlbwt::min_symbol;
-
-    for (uint64_t c = 0; c < 256; c++) {
-        bool occurs = false;
-        for (const std::array<uint8_t, 256>& seen_t : seen) occurs |= seen_t[c] != 0;
-        if (!occurs) continue;
-
-        if (next > UINT8_MAX) {
-            throw std::runtime_error("the input file contains more than " + std::to_string(256 - pfp_rlbwt::min_symbol)
-                + " distinct bytes, so they cannot be mapped");
-        }
-
-        map[c] = next++;
-    }
-
-    return map;
+    return rlbwt::build_byte_file(cli.path_input_file, cli.fasta_mode ? &transform : nullptr, cli.reverse,
+        pfp_rlbwt::min_symbol, params, cli.p, true, build_text);
 }
 
 // runs pfp_rlbwt::build on the input file read as symbols of type sym_t
 template <typename sym_t>
-pfp_rlbwt::result build(const std::array<uint8_t, 256>* map)
+pfp_rlbwt::result build()
 {
-    const pfp_rlbwt::file_source<sym_t> text(cli.path_input_file, cli.reverse, map);
-    return pfp_rlbwt::build(text, cli.base_name, cli.params);
+    if constexpr (sizeof(sym_t) == 1) {
+        return build_bytes();
+    } else {
+        const pfp_rlbwt::file_source<sym_t> text(cli.path_input_file, cli.reverse);
+        return pfp_rlbwt::build(text, cli.base_name, cli.params);
+    }
 }
 
 // computes the output files of the input file
@@ -262,6 +250,7 @@ void run()
         throw std::runtime_error("the size of the input file is not a multiple of " + std::to_string(cli.symbol_bytes)
             + " bytes");
     }
+    cli.fasta_mode = cli.symbol_bytes == 1 && uses_fasta_mode(cli.fasta, cli.path_input_file);
     params.num_threads = p;
     params.log = true;
     omp_set_num_threads(p);
@@ -288,6 +277,7 @@ void run()
     log_run_start(std::string("building the RLBWT of") + (cli.reverse ? " the reversed" : ""), cli.path_input_file,
         bytes, p, "w = " + format_number(params.window) + " symbols, mod = " + format_number(params.modulus)
         + (cli.symbol_bytes == 1 ? std::string() : ", symbol-bytes = " + std::to_string(cli.symbol_bytes))
+        + (cli.fasta_mode ? ", fasta = on" : "")
         + (params.recursive ? ", recursive with w = " + format_number(params.recursion_window) + " symbols, mod = "
             + format_number(params.recursion_modulus) : std::string()),
         output_names);
@@ -295,21 +285,10 @@ void run()
     const auto time_start = now();
     const uint64_t baseline_mem_usage = malloc_count_current();
     malloc_count_reset_peak();
-    std::array<uint8_t, 256> map {};
-
-    if (cli.map_bytes) {
-        auto time = now();
-        log_phase_start(true, time, "mapping the bytes");
-        map = byte_map();
-        log_phase_end(true, time);
-    }
-
     pfp_rlbwt::result result;
 
-    // only the bytes of a file with one-byte symbols are mapped
     switch (cli.symbol_bytes) {
-        #define PFP_RLBWT_SYMBOL_CASE(sym_t) \
-            case sizeof(sym_t): result = build<sym_t>(sizeof(sym_t) == 1 && cli.map_bytes ? &map : nullptr); break;
+        #define PFP_RLBWT_SYMBOL_CASE(sym_t) case sizeof(sym_t): result = build<sym_t>(); break;
         STRING_UTILS_FOR_EACH_SYMBOL_TYPE(PFP_RLBWT_SYMBOL_CASE)
         #undef PFP_RLBWT_SYMBOL_CASE
     }
@@ -338,6 +317,7 @@ void run()
             ("n", n)
             ("r", result.r)
             ("symbol_bytes", cli.symbol_bytes)
+            ("fasta", cli.fasta_mode)
             ("reversed", cli.reverse)
             ("window", params.window)
             ("modulus", params.modulus)
