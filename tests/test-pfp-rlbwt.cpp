@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -38,13 +39,17 @@
 #include <gtest/gtest.h>
 #include <omp.h>
 
+#include <misc/cli_help.hpp>
 #include <misc/repetitive_input.hpp>
 #include <misc/temp_files.hpp>
 #include <pfp_rlbwt/construction/parse.hpp>
 #include <pfp_rlbwt/fasta.hpp>
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
+#include <rlbwt/byte_file.hpp>
 #include <rlbwt/readers.hpp>
+#include "test-fasta.hpp"
 #include "test-fuzz.hpp"
+#include "test-inputs.hpp"
 #include "test-references.hpp"
 
 namespace {
@@ -54,7 +59,8 @@ constexpr uint64_t max_text_length = 20000;
 // maximum length of a fuzzed text, adjusted by run_fuzz
 uint64_t text_length = max_text_length;
 
-// maximum alphabet size, window length, modulus and number of threads of a fuzzed construction
+// maximum size of a small alphabet (see random_text), window length, modulus and number of threads of a fuzzed
+// construction
 constexpr uint64_t max_sigma = 6;
 constexpr uint64_t max_window = 8;
 constexpr uint64_t max_modulus = 24;
@@ -241,14 +247,11 @@ void check_random_access(reader_t& reader, const reference_t& expected, uint64_t
     }
 }
 
-// builds the output for a text with the given parameters and compares it with the expected output
+// compares the output of a build with the given parameters for a text, written with a prefix, with the expected output
 template <typename sym_t>
-void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& params)
+void check_output(const std::string& prefix, const std::vector<sym_t>& text, const pfp_rlbwt::params& params,
+    const pfp_rlbwt::result& result)
 {
-    const std::string prefix = temporary_file_path("pfp-rlbwt-test-");
-    const file_remover remover { output_files(prefix) };
-    pfp_rlbwt::memory_source<sym_t> source(text.data(), text.size());
-    const pfp_rlbwt::result result = pfp_rlbwt::build(source, prefix, params);
     const reference_t expected = compute_reference(text);
     const uint64_t n = text.size() + 1;
     const uint64_t r = expected.sym.size();
@@ -395,6 +398,17 @@ void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& param
     if (params.write_lcp) ASSERT_NO_FATAL_FAILURE(check_full(pfp_rlbwt::ext_lcp, expected.lcp_full));
 }
 
+// builds the output for a text with the given parameters and compares it with the expected output
+template <typename sym_t>
+void verify_build(const std::vector<sym_t>& text, const pfp_rlbwt::params& params)
+{
+    const std::string prefix = temporary_file_path("pfp-rlbwt-test-");
+    const file_remover remover { output_files(prefix) };
+    pfp_rlbwt::memory_source<sym_t> source(text.data(), text.size());
+    const pfp_rlbwt::result result = pfp_rlbwt::build(source, prefix, params);
+    ASSERT_NO_FATAL_FAILURE(check_output(prefix, text, params, result));
+}
+
 // draws the parameters of a construction
 pfp_rlbwt::params random_params()
 {
@@ -444,25 +458,30 @@ pfp_rlbwt::params random_params()
     return params;
 }
 
-/* draws a text with symbols of type sym_t: random or repetitive over sigma symbols, which are min_symbol, ... or, for
-   wider symbols, random values */
+/* draws a text with symbols of type sym_t, random or repetitive over a random alphabet: for one-byte symbols drawn from
+   all byte values (see random_byte_alphabet), else of up to max_sigma symbols that are min_symbol + c or, with
+   probability 1/2, a random value of at least min_symbol */
 template <typename sym_t>
 std::vector<sym_t> random_text(bool repetitive)
 {
-    const uint64_t sigma = random_in(1, max_sigma);
     std::vector<sym_t> alphabet;
 
-    for (uint64_t c = 0; c < sigma; c++) {
-        alphabet.push_back(sizeof(sym_t) == 1 || random_in(0, 1) == 0 ? sym_t(pfp_rlbwt::min_symbol + c)
-            : sym_t(random_in(pfp_rlbwt::min_symbol, max_value_of<sym_t>())));
+    if constexpr (sizeof(sym_t) == 1) {
+        alphabet = random_byte_alphabet(max_sigma, gen);
+    } else {
+        for (uint64_t c = 0, sigma = random_in(1, max_sigma); c < sigma; c++) {
+            alphabet.push_back(random_in(0, 1) == 0 ? sym_t(pfp_rlbwt::min_symbol + c)
+                : sym_t(random_in(pfp_rlbwt::min_symbol, max_value_of<sym_t>())));
+        }
     }
 
+    const uint64_t sigma = alphabet.size();
     std::vector<sym_t> text;
 
     if (repetitive) {
-        const std::string s = generate_repetitive_input<std::string>(
-            random_repetitive_params(random_in(1, text_length), gen), char(0), char(sigma - 1));
-        for (char c : s) text.push_back(alphabet[uint8_t(c)]);
+        const std::vector<uint64_t> ranks = generate_repetitive_input<std::vector<uint64_t>>(
+            random_repetitive_params(random_in(1, text_length), gen), 0, sigma - 1);
+        for (uint64_t c : ranks) text.push_back(alphabet[c]);
     } else {
         text.resize(random_in(0, text_length));
         for (sym_t& c : text) c = alphabet[random_in(0, sigma - 1)];
@@ -471,11 +490,99 @@ std::vector<sym_t> random_text(bool repetitive)
     return text;
 }
 
-// returns a functionality of run_fuzz that checks the construction on random texts with symbols of type sym_t
+// a byte file and the transformation it is read with in the FASTA mode
+struct byte_input {
+    std::string file; // the bytes of the file
+    std::optional<pfp_rlbwt::fasta_transform> fasta; // the transformation (none: the text is the file)
+};
+
+/* draws a byte file: with probability 1/2 a text of random_text, else a FASTA file (see random_fasta_file) read with
+   an alphabet of random_fasta_alphabet */
+byte_input random_byte_input(bool repetitive)
+{
+    byte_input input;
+
+    if (random_in(0, 1) == 0) {
+        const std::vector<uint8_t> text = random_text<uint8_t>(repetitive);
+        input.file.assign(text.begin(), text.end());
+        return input;
+    }
+
+    input.file = random_fasta_file(text_length, num_byte_values - 1, gen);
+    input.fasta.emplace(random_fasta_alphabet(gen));
+    return input;
+}
+
+/* builds the output for a byte file with the given parameters as pfp-rlbwt does (see rlbwt::build_byte_file), read
+   reversed with probability 1/2, and compares it with the expected output for its text, whose bytes are replaced by
+   their ranks among the distinct bytes plus min_symbol if one is below min_symbol; then the runs file stores these
+   bytes (see section_byte_map) */
+void verify_byte_input(const byte_input& input, pfp_rlbwt::params params)
+{
+    const std::string path = temporary_file_path("pfp-rlbwt-test-input-");
+    const std::string prefix = temporary_file_path("pfp-rlbwt-test-");
+    file_remover remover { output_files(prefix) };
+    remover.paths.push_back(path);
+    std::ofstream(path, std::ios::binary).write(input.file.data(), input.file.size());
+    const bool reverse = random_in(0, 1) != 0;
+    const pfp_rlbwt::result result = rlbwt::build_byte_file(path, input.fasta ? &*input.fasta : nullptr, reverse,
+        pfp_rlbwt::min_symbol, params, params.num_threads, false,
+        [&](const auto& text) { return pfp_rlbwt::build(text, prefix, params); });
+
+    std::string text = input.fasta ? reference_fasta_text(input.file, *input.fasta) : input.file;
+    if (reverse) std::reverse(text.begin(), text.end());
+    std::vector<uint8_t> bytes(text.begin(), text.end()); // the distinct bytes of the text in increasing order
+    std::sort(bytes.begin(), bytes.end());
+    bytes.erase(std::unique(bytes.begin(), bytes.end()), bytes.end());
+    const bool mapped = !bytes.empty() && bytes[0] < pfp_rlbwt::min_symbol;
+
+    // returns the symbol of the byte c in the BWT
+    auto symbol_of = [&](uint8_t c) -> uint64_t {
+        if (!mapped) return c;
+        return pfp_rlbwt::min_symbol + (std::lower_bound(bytes.begin(), bytes.end(), c) - bytes.begin());
+    };
+
+    // the section of the byte map: min_symbol and the distinct bytes
+    pfp_rlbwt::run_data_file file;
+    ASSERT_TRUE(file.open(prefix + pfp_rlbwt::ext_runs));
+    std::string section;
+    ASSERT_EQ(file.read_section(pfp_rlbwt::section_byte_map, section), mapped);
+    rlbwt::byte_map map;
+    ASSERT_EQ(map.load(file), mapped);
+
+    if (mapped) {
+        uint64_t smallest;
+        ASSERT_GE(section.size(), sizeof(smallest));
+        std::memcpy(&smallest, section.data(), sizeof(smallest));
+        EXPECT_EQ(smallest, pfp_rlbwt::min_symbol);
+        EXPECT_EQ(section.substr(sizeof(smallest)), std::string(bytes.begin(), bytes.end()));
+        for (uint8_t c : bytes) ASSERT_EQ(map.byte_of(symbol_of(c)), c);
+    }
+
+    // the symbols of the text, one byte each unless they are mapped to 16-bit symbols
+    std::vector<uint64_t> symbols;
+    for (char c : text) symbols.push_back(symbol_of(uint8_t(c)));
+
+    if (!mapped || pfp_rlbwt::min_symbol + bytes.size() <= num_byte_values) {
+        const std::vector<uint8_t> expected(symbols.begin(), symbols.end());
+        ASSERT_NO_FATAL_FAILURE(check_output(prefix, expected, params, result));
+    } else {
+        const std::vector<uint16_t> expected(symbols.begin(), symbols.end());
+        ASSERT_NO_FATAL_FAILURE(check_output(prefix, expected, params, result));
+    }
+}
+
+// returns a functionality of run_fuzz that checks the construction on random inputs with symbols of type sym_t
 template <typename sym_t>
 fuzz_functionality fuzz(const std::string& name, bool repetitive)
 {
-    return { name, [repetitive](uint64_t) { verify_build(random_text<sym_t>(repetitive), random_params()); }, false };
+    if constexpr (sizeof(sym_t) == 1) {
+        return { name, [repetitive](uint64_t) { verify_byte_input(random_byte_input(repetitive), random_params()); },
+            false };
+    } else {
+        return { name, [repetitive](uint64_t) { verify_build(random_text<sym_t>(repetitive), random_params()); },
+            false };
+    }
 }
 
 // returns a transformation of FASTA files with random options
@@ -801,8 +908,8 @@ void verify_fasta_ranges(bool long_lines)
 TEST(test_pfp_rlbwt, fuzz)
 {
     run_fuzz("pfp-rlbwt", {
-        fuzz<uint8_t>("random 8 bit", false),
-        fuzz<uint8_t>("repetitive 8 bit", true),
+        fuzz<uint8_t>("random 8 bit or FASTA", false),
+        fuzz<uint8_t>("repetitive 8 bit or FASTA", true),
         fuzz<uint16_t>("repetitive 16 bit", true),
         fuzz<uint24_t>("repetitive 24 bit", true),
         fuzz<uint32_t>("repetitive 32 bit", true),
@@ -928,8 +1035,8 @@ TEST(test_pfp_rlbwt, word_ids)
 
 TEST(test_pfp_rlbwt, parameter_limits)
 {
-    const std::vector<uint8_t> text = random_text<uint8_t>(true);
-    pfp_rlbwt::memory_source<uint8_t> source(text.data(), text.size());
+    const std::vector<uint16_t> text = random_text<uint16_t>(true);
+    pfp_rlbwt::memory_source<uint16_t> source(text.data(), text.size());
     const std::string prefix = temporary_file_path("pfp-rlbwt-test-");
     const file_remover remover { output_files(prefix) };
 

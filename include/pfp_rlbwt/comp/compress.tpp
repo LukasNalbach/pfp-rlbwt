@@ -56,6 +56,7 @@
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
 #include <pfp_rlbwt/comp/pfp_rlbwt_comp.hpp>
 #include <pfp_rlbwt/comp/run_model.hpp>
+#include <rlbwt/byte_map.hpp>
 #include <rlbwt/readers.hpp>
 
 namespace pfp_rlbwt::comp {
@@ -117,13 +118,9 @@ inline void append_rlbwt(uint64_t n, const byte_set& occurs, make_source_t make_
         return;
     }
 
-    // [0..255] symbol[c] = the symbol of pfp-rlbwt of the byte c: its rank among the bytes of the text plus min_symbol
-    std::array<uint16_t, num_byte_values> symbol {};
-    uint64_t sigma = 0;
-
-    for (uint64_t c = 0; c < num_byte_values; c++) {
-        if (occurs[c]) symbol[c] = uint16_t(pfp_rlbwt::min_symbol + sigma++);
-    }
+    // the symbols of pfp-rlbwt of the bytes: their ranks among the bytes of the text plus min_symbol
+    const rlbwt::byte_map symbols(occurs, pfp_rlbwt::min_symbol);
+    const uint64_t sigma = symbols.sigma();
 
     // the alphabet: one bit per byte value, set iff the byte occurs in the text
     for (uint64_t c = 0; c < num_byte_values; c += std::numeric_limits<uint8_t>::digits) {
@@ -138,15 +135,9 @@ inline void append_rlbwt(uint64_t n, const byte_set& occurs, make_source_t make_
     pfp_params.num_threads = uint16_t(std::min<uint64_t>(p, std::numeric_limits<uint16_t>::max()));
     pfp_params.write_sa_samples = true;
     pfp_params.log = params.log;
-    pfp_rlbwt::result bwt;
-
-    if (pfp_rlbwt::min_symbol + sigma <= num_byte_values) {
-        std::array<uint8_t, num_byte_values> symbol8 {};
-        for (uint64_t c = 0; c < num_byte_values; c++) symbol8[c] = uint8_t(symbol[c]);
-        bwt = pfp_rlbwt::build(make_source(symbol8), prefix, pfp_params);
-    } else {
-        bwt = pfp_rlbwt::build(make_source(symbol), prefix, pfp_params);
-    }
+    const pfp_rlbwt::result bwt = symbols.with_symbols([&](const auto& map) {
+        return pfp_rlbwt::build(make_source(map), prefix, pfp_params);
+    });
 
     auto time = now();
     log_phase_start(params.log, time, "coding the runs");

@@ -53,6 +53,15 @@ These options are `ON` if pfp-rlbwt is the top-level project. The general option
 - **pfp-rlbwt**: writes the runs of the BWT of a file to `<input_file>.bwt-runs`; `-format compressed` selects the
   compressed format, `-sa` and `-lcp` add the SA and LCP samples, `-full-sa` also writes the suffix array.
   `pfp-rlbwt -p 8 -format compressed -sa -lcp text.txt`
+
+  The file may contain every byte value. If a byte below 2 (`pfp_rlbwt::min_symbol`) occurs, the distinct bytes are
+  mapped to 2, 3, ... in increasing order, to 16-bit symbols if more than 254 distinct bytes occur. The BWT then
+  consists of the mapped bytes, and the runs file stores the map as the section `section_byte_map`: the symbol of the
+  smallest byte (64 bits), then the distinct bytes in increasing order (one byte each); `rlbwt::byte_map::load` reads
+  it. With `-fasta on` (or `auto`, the default, for files that start like FASTA files), the text is the one of the
+  FASTA file: each header line and each run of symbols outside the alphabet of `-A` (default `ACGT`, after
+  upper-casing) is replaced with one separator symbol (`0x7F`), the lines before the first header are skipped and
+  carriage returns are dropped.
 - **pfp-rlbwt-comp**: compresses a file into `<input_file>.rlbwt` and restores it with `-d`. A FASTA file is stored as
   its sequences, its header lines and its line layout (`-fasta on|off|auto`).
   `pfp-rlbwt-comp -p 16 text.txt` and `pfp-rlbwt-comp -d -p 16 -o restored.txt text.txt.rlbwt`
