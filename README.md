@@ -41,9 +41,9 @@ cmake --build build -j
 | --- | --- |
 | `PFP_RLBWT_BUILD_CLI` | build `pfp-rlbwt` |
 | `PFP_RLBWT_BUILD_COMP`, `PFP_RLBWT_BUILD_COMP_CLI` | build the compressor library `pfp_rlbwt_comp` and `pfp-rlbwt-comp` |
-| `PFP_RLBWT_BUILD_TESTS` | build the tests |
+| `PFP_RLBWT_BUILD_TESTS` | build the tests (`OFF`) |
 
-These options are `ON` if pfp-rlbwt is the top-level project. The general options and environment variables
+The other options are `ON` if pfp-rlbwt is the top-level project. The general options and environment variables
 (`PFP_RLBWT_MARCH_NATIVE`, `PFP_RLBWT_TMPDIR`, ...) are described in string-utils.
 
 ## Command-line tools
@@ -141,6 +141,8 @@ int main()
 ## Tests
 
 ```shell
+cmake -B build -DPFP_RLBWT_BUILD_TESTS=ON
+cmake --build build
 build/tests/test-pfp-rlbwt
 build/tests/test-pfp-rlbwt-wide
 build/tests/test-pfp-rlbwt-comp

@@ -45,7 +45,8 @@
 
 namespace {
 
-std::mt19937_64 gen(test_seed());
+// one generator per thread (run_fuzz runs parallel functionalities on all threads)
+thread_local std::mt19937_64 gen(test_seed() + omp_get_thread_num());
 
 // maximum length of a random text; adjusted by run_fuzz
 uint64_t max_input_size = 100000;
@@ -133,10 +134,11 @@ void verify_fasta_chunks(const std::string& T)
     ASSERT_EQ(split.text.freq, one.text.freq);
 }
 
-// returns parameters of the compression with a random number of threads and the default number of start pairs
+// returns parameters of the compression with a random number of threads (one in a parallel functionality, which
+// run_fuzz runs on all threads) and the default number of start pairs
 pfp_rlbwt::comp::compress_params random_params()
 {
-    return { .num_threads = random_in(1, std::max<uint64_t>(1, omp_get_max_threads())) };
+    return { .num_threads = omp_in_parallel() ? 1 : random_in(1, std::max<uint64_t>(1, omp_get_max_threads())) };
 }
 
 /* sets runs_per_block, for half of the calls, to a random value for which the at most n + 1 runs of the BWT of a text
@@ -364,15 +366,44 @@ TEST(test_pfp_rlbwt_comp, fasta_edge_cases)
     }
 }
 
-TEST(test_pfp_rlbwt_comp, everything)
+TEST(test_pfp_rlbwt_comp, random_texts)
 {
-    // the tests use multiple threads themselves and run one after another
     run_fuzz("pfp-rlbwt-comp", {
-        { "random-texts", [](uint64_t) { verify_random_texts(); }, false },
-        { "repetitive-texts", [](uint64_t) { verify_repetitive_texts(); }, false },
-        { "all-byte-values", [](uint64_t) { verify_all_byte_values(); }, false },
-        { "one-symbol", [](uint64_t) { verify_one_symbol(); }, false },
-        { "random-fasta", [](uint64_t) { verify_random_fasta(); }, false },
-        { "random-bytes-as-fasta", [](uint64_t) { verify_random_bytes_as_fasta(); }, false }
+        { "random-texts", [](uint64_t) { verify_random_texts(); }, true }
+    }, fuzz_iterations(), &max_input_size, min_input_size);
+}
+
+TEST(test_pfp_rlbwt_comp, repetitive_texts)
+{
+    run_fuzz("pfp-rlbwt-comp", {
+        { "repetitive-texts", [](uint64_t) { verify_repetitive_texts(); }, true }
+    }, fuzz_iterations(), &max_input_size, min_input_size);
+}
+
+TEST(test_pfp_rlbwt_comp, all_byte_values)
+{
+    run_fuzz("pfp-rlbwt-comp", {
+        { "all-byte-values", [](uint64_t) { verify_all_byte_values(); }, true }
+    }, fuzz_iterations(), &max_input_size, min_input_size);
+}
+
+TEST(test_pfp_rlbwt_comp, one_symbol)
+{
+    run_fuzz("pfp-rlbwt-comp", {
+        { "one-symbol", [](uint64_t) { verify_one_symbol(); }, true }
+    }, fuzz_iterations(), &max_input_size, min_input_size);
+}
+
+TEST(test_pfp_rlbwt_comp, random_fasta)
+{
+    run_fuzz("pfp-rlbwt-comp", {
+        { "random-fasta", [](uint64_t) { verify_random_fasta(); }, true }
+    }, fuzz_iterations(), &max_input_size, min_input_size);
+}
+
+TEST(test_pfp_rlbwt_comp, random_bytes_as_fasta)
+{
+    run_fuzz("pfp-rlbwt-comp", {
+        { "random-bytes-as-fasta", [](uint64_t) { verify_random_bytes_as_fasta(); }, true }
     }, fuzz_iterations(), &max_input_size, min_input_size);
 }

@@ -415,7 +415,8 @@ pfp_rlbwt::params random_params()
     pfp_rlbwt::params params;
     params.window = random_in(1, max_window);
     params.modulus = random_in(1, max_modulus);
-    params.num_threads = random_in(1, max_threads);
+    // one thread in a parallel functionality (run_fuzz runs it on all threads)
+    params.num_threads = omp_in_parallel() ? 1 : random_in(1, max_threads);
     // the values at the run boundaries and the full arrays are written with probability 1/2 each
     params.write_sa_samples = random_in(0, 1) != 0;
     params.write_lcp_samples = random_in(0, 1) != 0;
@@ -572,16 +573,17 @@ void verify_byte_input(const byte_input& input, pfp_rlbwt::params params)
     }
 }
 
-// returns a functionality of run_fuzz that checks the construction on random inputs with symbols of type sym_t
+// returns a functionality of run_fuzz that checks the construction on random inputs with symbols of type sym_t; a
+// parallel one builds with one thread, a serial one with up to max_threads threads (see random_params)
 template <typename sym_t>
-fuzz_functionality fuzz(const std::string& name, bool repetitive)
+fuzz_functionality fuzz(const std::string& name, bool repetitive, bool parallel = true)
 {
     if constexpr (sizeof(sym_t) == 1) {
         return { name, [repetitive](uint64_t) { verify_byte_input(random_byte_input(repetitive), random_params()); },
-            false };
+            parallel };
     } else {
         return { name, [repetitive](uint64_t) { verify_build(random_text<sym_t>(repetitive), random_params()); },
-            false };
+            parallel };
     }
 }
 
@@ -905,21 +907,61 @@ void verify_fasta_ranges(bool long_lines)
 
 } // namespace
 
-TEST(test_pfp_rlbwt, fuzz)
+TEST(test_pfp_rlbwt, random_8_bit)
 {
-    run_fuzz("pfp-rlbwt", {
-        fuzz<uint8_t>("random 8 bit or FASTA", false),
-        fuzz<uint8_t>("repetitive 8 bit or FASTA", true),
-        fuzz<uint16_t>("repetitive 16 bit", true),
-        fuzz<uint24_t>("repetitive 24 bit", true),
-        fuzz<uint32_t>("repetitive 32 bit", true),
-        fuzz<uint40_t>("random 40 bit", false),
-        fuzz<uint48_t>("random 48 bit", false),
-        fuzz<uint48_t>("repetitive 48 bit", true),
-        fuzz<uint56_t>("repetitive 56 bit", true),
-        fuzz<uint64_t>("random 64 bit", false),
-        fuzz<uint64_t>("repetitive 64 bit", true),
-    }, fuzz_iterations(), &text_length);
+    run_fuzz("pfp-rlbwt", { fuzz<uint8_t>("random 8 bit or FASTA", false) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_8_bit)
+{
+    // serial, such that the constructions use several threads
+    run_fuzz("pfp-rlbwt", { fuzz<uint8_t>("repetitive 8 bit or FASTA", true, false) }, fuzz_iterations(),
+        &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_16_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint16_t>("repetitive 16 bit", true) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_24_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint24_t>("repetitive 24 bit", true) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_32_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint32_t>("repetitive 32 bit", true) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, random_40_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint40_t>("random 40 bit", false) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, random_48_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint48_t>("random 48 bit", false) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_48_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint48_t>("repetitive 48 bit", true) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_56_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint56_t>("repetitive 56 bit", true) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, random_64_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint64_t>("random 64 bit", false) }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, repetitive_64_bit)
+{
+    run_fuzz("pfp-rlbwt", { fuzz<uint64_t>("repetitive 64 bit", true) }, fuzz_iterations(), &text_length);
 }
 
 /* checks the compressed format on a random text whose runs fill several batches of the compressed writer, with LCP
@@ -953,8 +995,14 @@ TEST(test_pfp_rlbwt, fasta_source)
 TEST(test_pfp_rlbwt, fasta_ranges)
 {
     run_fuzz("pfp-rlbwt-fasta-ranges", {
-        { "random FASTA files", [](uint64_t) { verify_fasta_ranges(false); }, false },
-        { "FASTA files with long lines", [](uint64_t) { verify_fasta_ranges(true); }, false },
+        { "random FASTA files", [](uint64_t) { verify_fasta_ranges(false); }, true }
+    }, fuzz_iterations(), &text_length);
+}
+
+TEST(test_pfp_rlbwt, fasta_ranges_long_lines)
+{
+    run_fuzz("pfp-rlbwt-fasta-ranges", {
+        { "FASTA files with long lines", [](uint64_t) { verify_fasta_ranges(true); }, true }
     }, fuzz_iterations(), &text_length);
 }
 

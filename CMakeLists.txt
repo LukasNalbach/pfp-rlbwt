@@ -34,7 +34,7 @@ if(NOT TARGET move_data_structure)
 endif()
 
 option(PFP_RLBWT_BUILD_CLI "Build pfp-rlbwt" ${PROJECT_IS_TOP_LEVEL})
-option(PFP_RLBWT_BUILD_TESTS "Build the tests" ${PROJECT_IS_TOP_LEVEL})
+option(PFP_RLBWT_BUILD_TESTS "Build the tests" OFF)
 option(PFP_RLBWT_BUILD_COMP "Build the compressor library pfp_rlbwt_comp" ${PROJECT_IS_TOP_LEVEL})
 option(PFP_RLBWT_BUILD_COMP_CLI "Build pfp-rlbwt-comp" ${PROJECT_IS_TOP_LEVEL})
 

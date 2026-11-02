@@ -348,11 +348,11 @@ parse_sa<idx_t> sort_parse_recursively(phrase_arrays<idx_t, sym_t>& arr, uint64_
     if (!out.completed) return psa;
 
     if (prm.log) {
-        log_out() << "r(BWT(" << level_name("P") << ")) = " << format_number(out.r) << ", J/r = "
+        log_out() << "r(BWT(" << level_name("P") << ")) = " << format_number(out.r) << ", |" << level_name("P") << "|/r = "
                   << format_ratio(double(J) / double(out.r)) << std::endl;
     }
 
-    log_phase_start(prm.log, time, "ordering the phrase runs by SA of " + level_name("P"));
+    log_phase_start(prm.log, time, "sorting the phrase ends by SA of " + level_name("P"));
 
     build_bwt_runs(psa, out, J, threads);
 
@@ -426,7 +426,7 @@ void build_psi_from_runs(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>& arr,
     log_phase_end(prm.log, time);
 
     if (!arr.repeated_words.empty()) {
-        log_phase_start(prm.log, time, "ordering the repeated phrases of " + level_name("P"));
+        log_phase_start(prm.log, time, "sorting the repeated phrases of " + level_name("P"));
         build_repeated_word_ranks(psa, arr, J, w, dict, threads);
         log_phase_end(prm.log, time);
     }

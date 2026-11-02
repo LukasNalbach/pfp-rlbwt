@@ -1199,7 +1199,7 @@ phrase_arrays<idx_t, sym_t> build_phrase_arrays(parsing<sym_t>& prs, const std::
     std::vector<std::vector<uint64_t>> extra_of_part(parts, std::vector<uint64_t>(R, 0));
 
     {
-        arr.ends_file = temporary_array(prefix + ext_phrase_run_ends, temporary_arrays_in_memory());
+        arr.ends_file = temporary_array(prefix + ext_phrase_run_ends, temporary_arrays_in_memory(J * bytes));
         const std::unique_ptr<positioned_output> ends_out = arr.ends_file.output(J * bytes);
 
         run_on_threads(threads, [&](uint64_t t, uint64_t team_size) {
