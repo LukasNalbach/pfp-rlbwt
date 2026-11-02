@@ -444,8 +444,16 @@ public:
     void close() override { }
 };
 
-// returns whether the arrays the construction keeps temporarily are kept in RAM instead of in files (see current_level)
-inline bool temporary_arrays_in_memory() { return current_level >= 2; }
+/**
+ * @brief returns whether an array the construction keeps temporarily is kept in RAM instead of in a file: on the levels
+ *        after the first of the recursive prefix-free parsing, whose arrays are small (see current_level), and if it
+ *        fits into the buffer of a file written with O_DIRECT (then storing it does not lower the peak memory usage)
+ * @param bytes the size of the array in bytes
+ */
+inline bool temporary_arrays_in_memory(uint64_t bytes)
+{
+    return current_level >= 2 || bytes < direct_filebuf_base::buffer_length;
+}
 
 /**
  * @brief an array that the construction keeps temporarily: in a file (see temporary_file) or, on the levels after the

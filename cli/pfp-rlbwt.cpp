@@ -275,10 +275,10 @@ void run()
     }
 
     log_run_start(std::string("building the RLBWT of") + (cli.reverse ? " the reversed" : ""), cli.path_input_file,
-        bytes, p, "w = " + format_number(params.window) + " symbols, mod = " + format_number(params.modulus)
+        bytes, p, "w = " + format_number(params.window) + ", m = " + format_number(params.modulus)
         + (cli.symbol_bytes == 1 ? std::string() : ", symbol-bytes = " + std::to_string(cli.symbol_bytes))
         + (cli.fasta_mode ? ", fasta = on" : "")
-        + (params.recursive ? ", recursive with w = " + format_number(params.recursion_window) + " symbols, mod = "
+        + (params.recursive ? ", recursive with w = " + format_number(params.recursion_window) + ", m = "
             + format_number(params.recursion_modulus) : std::string()),
         output_names);
 
@@ -305,9 +305,9 @@ void run()
     }
 
     const uint64_t n = result.n_with_terminator - 1;
-    log_out() << "n = " << format_number(n) << ", r = " << format_number(result.r) << ", n/r = "
-              << format_ratio(double(n) / double(result.r)) << std::endl;
-    log_construction_summary(time_ns, bytes, peak);
+    log_message("n = " + format_number(n) + ", r = " + format_number(result.r) + ", n/r = "
+        + format_ratio(double(n) / double(result.r)) + "\n");
+    log_construction_summary("RLBWT", time_ns, bytes, peak);
     log_output_size("output", output_size, bytes);
 
     if (cli.measurement_file.is_open()) {

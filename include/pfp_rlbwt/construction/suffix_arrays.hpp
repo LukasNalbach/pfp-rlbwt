@@ -856,14 +856,13 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
     for (uint64_t x = 0; x <= J; x++) SA[x] = ISA[uint64_t(SA[x]) == J ? 0 : uint64_t(SA[x]) + 1];
 
     log_phase_end(prm.log, time);
-    temporary_array isa_file(file, temporary_arrays_in_memory());
+    temporary_array isa_file(file, temporary_arrays_in_memory((J + 1) * sizeof(idx_t)));
 
     if (isa_file.is_in_memory()) {
         isa_file.store(std::move(ISA), J + 1);
     } else {
-        log_phase_start(prm.log, time, "storing ISA of " + level_name("P"));
+        log_phase_start(prm.log, time, "storing data structures to disk");
         isa_file.store(std::move(ISA), J + 1);
-        log_spilled_size(prm.log, file);
         log_phase_end(prm.log, time);
     }
 
@@ -875,7 +874,7 @@ parse_sa<idx_t> build_parse_sa(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uin
     /* ends_by_rank[ISA[v]] = F_{v-1} for v in [0..J]; thread t of p threads reads ISA[v] and F_{v-1} from their
        temporary arrays for v in [t * (J+1) / p, (t+1) * (J+1) / p), with readers that together read
        temporary_read_bytes bytes at once */
-    log_phase_start(prm.log, time, "ordering the phrase runs by SA of " + level_name("P"));
+    log_phase_start(prm.log, time, "sorting the phrase ends by SA of " + level_name("P"));
     arr.ends_by_rank = uint_array(J + 1, arr.position_bytes);
 
     run_on_threads(threads, [&](uint64_t t, uint64_t p) {
@@ -960,16 +959,15 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
     log_phase_end(prm.log, time);
 
     // Phi is computed in the place of SA if SA is stored in a file
-    dsa.sa_file = temporary_array(file, temporary_arrays_in_memory());
+    dsa.sa_file = temporary_array(file, temporary_arrays_in_memory(size * sizeof(idx_t)));
     malloc_array_t<idx_t> phi_array;
 
     if (dsa.sa_file.is_in_memory()) {
         phi_array = new_malloc_array<idx_t>(size);
         dsa.sa_file.store(std::move(SA), size);
     } else {
-        log_phase_start(prm.log, time, "storing SA of " + level_name("D"));
+        log_phase_start(prm.log, time, "storing data structures to disk");
         dsa.sa_file.write(SA.get(), size * sizeof(idx_t));
-        log_spilled_size(prm.log, file);
         log_phase_end(prm.log, time);
         phi_array = std::move(SA);
     }
@@ -1010,7 +1008,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
     /* bit x of equals_phi_bits = 1 <=> the suffix at position x is longer than w and equals the suffix Phi[x] up to
        their separators; l is the length of their common prefix, which decreases by at most one from one position to
        the next (as in the computation of the PLCP array), and is 0 at a separator */
-    log_phase_start(prm.log, time, "finding the equal suffixes of " + level_name("D"));
+    log_phase_start(prm.log, time, "computing the equal suffixes of " + level_name("D"));
     malloc_array_t<uint64_t> equals_phi_bits = new_malloc_array<uint64_t>(num_bit_blocks);
     auto sym = [&](uint64_t x) { return uint64_t(text[x]); };
     phase_progress equal_prog(prm.log, num_bit_blocks);
@@ -1042,7 +1040,7 @@ dictionary_sa<idx_t> build_dictionary_sa(const dictionary<sym_t>& dict, uint64_t
     log_phase_end(prm.log, time);
 
     // bit i of dsa.equals_previous_bits is bit SA[i] of equals_phi_bits
-    log_phase_start(prm.log, time, "reading SA of " + level_name("D"));
+    log_phase_start(prm.log, time, "reading data structures from disk");
     dsa.equals_previous_bits = new_malloc_array<uint64_t>(num_bit_blocks);
     phase_progress read_prog(prm.log, size);
 

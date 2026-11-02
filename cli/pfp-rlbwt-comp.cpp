@@ -66,11 +66,10 @@ void compress(compressor_cli_t& cli)
         { .num_threads = cli.threads, .fasta = cli.fasta, .log = cli.log });
     const uint64_t time_ns = time_diff_ns(time_start, now());
     const uint64_t peak = overall_peak() - baseline;
-    if (cli.fasta) log_out() << "records = " << format_number(res.num_records) << ", ";
-    log_out() << "n = " << format_number(res.sequence_length) << ", sigma = " << res.sigma << ", r = "
-              << format_number(res.r) << ", n/r = "
-              << format_ratio(double(res.sequence_length) / double(std::max<uint64_t>(1, res.r))) << std::endl;
-    log_construction_summary(time_ns, n, is_malloc_count_linked ? peak : peak_not_measured);
+    log_message((cli.fasta ? format_number(res.num_records) + " records, " : std::string()) + "n = "
+        + format_number(res.sequence_length) + ", sigma = " + std::to_string(res.sigma) + ", r = " + format_number(res.r)
+        + ", n/r = " + format_ratio(double(res.sequence_length) / double(std::max<uint64_t>(1, res.r))) + "\n");
+    log_construction_summary("compressed RLBWT", time_ns, n, is_malloc_count_linked ? peak : peak_not_measured);
     log_compression_ratio(res.file_bytes, n);
 
     if (cli.measurement_file.is_open()) {

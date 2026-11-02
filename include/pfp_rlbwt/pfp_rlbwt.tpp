@@ -95,8 +95,7 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
     // P is suffix-sorted with its prefix-free parsing if J >= recursion_min_phrase_runs and J <= n / 2
     bool recursive = prm.recursive && J >= prm.recursion_min_phrase_runs && 2 * J <= prs.n;
 
-    log_phase_start(prm.log, time, "storing the phrase runs" + std::string(current_level == 1 ? ""
-        : " of " + level_name("P")));
+    log_phase_start(prm.log, time, "building " + level_name("P"));
     phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p, recursive);
     log_phase_end(prm.log, time);
 
@@ -111,7 +110,7 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
         if (!next_level.completed) {
             recursive = false;
             psa = parse_sa<idx_t>();
-            log_phase_start(prm.log, time, "storing " + level_name("P") + ", which its PFP does not halve");
+            log_phase_start(prm.log, time, "storing data structures to disk");
             store_parse(arr, J, p);
             log_phase_end(prm.log, time);
         }
@@ -135,7 +134,7 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
         r = merge<sym_t, idx_t>(prs, dsa, psa, arr, run_prm, prefix, true, &run_starts);
         log_phase_end(prm.log, time);
 
-        log_phase_start(prm.log, time, "sampling the PLCP array");
+        log_phase_start(prm.log, time, "sampling PLCP");
         const sampled_plcp plcp = build_sampled_plcp(run_starts, prs.n + 1, p);
         log_phase_end(prm.log, time);
 
@@ -226,7 +225,7 @@ result build_parsed(text_ranges<sym_t>& text, const std::string& prefix, params 
 
     // a degenerate parse: parse again with the other seed and keep the parse with more phrases
     if (level_out == nullptr && prs.num_phrases < n / (degenerate_parse_tolerance * prm.modulus)) {
-        log_phase_start(prm.log, time, "only " + format_number(prs.num_phrases) + " phrases, reparsing");
+        log_phase_start(prm.log, time, "building PFP again (only " + format_count(prs.num_phrases, "phrase") + ")");
         parsing<sym_t> retry = parse<sym_t>(text, prm, seed == 0 ? retry_trigger_seed : 0);
         log_phase_end(prm.log, time);
         if (retry.num_phrases > prs.num_phrases) prs = std::move(retry);
@@ -240,12 +239,16 @@ result build_parsed(text_ranges<sym_t>& text, const std::string& prefix, params 
     res.dictionary_size = prs.dict.size;
 
     if (prm.log) {
+        /* |P| is the number of phrase runs; the share of the phrases that equal the phrase before them, i.e., that are
+           merged into a run, follows if there are any (their number, if the share rounds to 0.00 %) */
         const uint64_t pfp_size = res.num_phrases + res.dictionary_size;
-        log_out() << "|" << level_name("P") << "| = " << format_number(res.num_phrase_runs) << " phrase runs, "
-                  << format_number(res.num_phrases) << " phrases, " << format_number(res.num_words) << " words, |"
-                  << level_name("D") << "| = " << format_number(res.dictionary_size) << ", |PFP| = "
-                  << format_number(pfp_size) << ", n/|PFP| = " << format_ratio(double(n) / double(pfp_size))
-                  << std::endl;
+        const uint64_t merged = res.num_phrases - res.num_phrase_runs;
+        const std::string merged_share = merged == 0 ? std::string()
+            : 20000 * merged < res.num_phrases ? " (" + format_count(merged, "phrase") + " in runs)"
+            : " (" + format_percentage(merged, res.num_phrases) + " runs)";
+        log_message("|" + level_name("P") + "| = " + format_number(res.num_phrase_runs) + merged_share
+            + ", |" + level_name("D") + "| = " + format_number(res.dictionary_size) + ", " + level_name("d") + " = "
+            + format_number(res.num_words) + ", n/|PFP| = " + format_ratio(double(n) / double(pfp_size)) + "\n");
     }
 
     if (stopped) return res;
