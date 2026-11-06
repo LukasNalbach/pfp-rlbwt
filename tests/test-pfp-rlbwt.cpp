@@ -364,11 +364,11 @@ void check_output(const std::string& prefix, const std::vector<sym_t>& text, con
     } else {
         pfp_rlbwt::compressed_disk_reader reader(file);
         ASSERT_NO_FATAL_FAILURE(check_random_access(reader, expected, 1 + 2 * sa + lcp, sa, lcp));
-        pfp_rlbwt::compressed_run_data in_ram(file, random_in(1, max_threads));
+        pfp_rlbwt::compressed_ram_reader in_ram(file, random_in(1, max_threads));
         ASSERT_NO_FATAL_FAILURE(check_random_access(in_ram, expected, 0, sa, lcp));
     }
 
-    pfp_rlbwt::packed_run_data packed(file, random_in(1, max_threads));
+    pfp_rlbwt::packed_ram_reader packed(file, random_in(1, max_threads));
     ASSERT_NO_FATAL_FAILURE(check_random_access(packed, expected, 0, sa, lcp));
 
     // the full BWT
