@@ -113,7 +113,7 @@ int main()
     // random access on the disk and in RAM
     pfp_rlbwt::plain_disk_reader disk(data);
     std::cout << disk.run_of(7) << " " << disk.length(4) << std::endl; // 4 5
-    pfp_rlbwt::packed_run_data packed(data, 2);
+    pfp_rlbwt::packed_ram_reader packed(data, 2);
     std::cout << packed.run(1).start << " " << packed.sa_end(0) << std::endl; // 3 2
 }
 ```
