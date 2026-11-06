@@ -43,7 +43,7 @@ psi_mds::psi_mds(mds_pairs&& pairs, uint64_t num_ranks, const interleaved_bit_al
     const mds_params prm { .num_threads = threads, .pair_rows = pair_rows.data() };
     // the construction sets the number of threads of OpenMP (omp_set_num_threads), which is restored afterwards
     const int omp_threads = omp_get_max_threads();
-    const move_data_structure<POS, UNI> M(std::move(pairs), num_ranks, prm,
+    const move_data_structure<CACHE_LINES, UNI> M(std::move(pairs), num_ranks, prm,
         { uint8_t(words.width_of(0)), uint8_t(advances.width_of(0)) });
     omp_set_num_threads(omp_threads);
     k = M.num_intervals();

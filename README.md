@@ -46,6 +46,19 @@ cmake --build build -j
 The other options are `ON` if pfp-rlbwt is the top-level project. The general options and environment variables
 (`PFP_RLBWT_MARCH_NATIVE`, `PFP_RLBWT_TMPDIR`, ...) are described in string-utils.
 
+### macOS
+
+Apple Clang has no OpenMP runtime; install LLVM's `libomp` and the build tools with [Homebrew](https://brew.sh) (the
+compiler comes with Xcode or the Command Line Tools, `xcode-select --install`):
+
+```shell
+brew install cmake ninja libomp
+```
+
+Then build as above. CMake finds `libomp` in Homebrew or MacPorts, or in the prefix given with `-DOpenMP_ROOT=<prefix>`;
+see [string-utils](https://github.com/LukasNalbach/string-utils#macos) for the details and the differences from Linux.
+Tested on Apple silicon with Apple Clang 21 (macOS 26).
+
 ## Command-line tools
 
 `<tool> -h` prints the options of a tool.

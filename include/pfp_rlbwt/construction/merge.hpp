@@ -203,14 +203,7 @@ struct alignas(cache_line_bytes) chunk_runs {
     pending_lcps* lcps = nullptr;
 
     // frees the memory of the data of the chunk
-    void release()
-    {
-        records = no_init_vector<uint8_t>();
-        run_starts = std::vector<run_start_values>();
-        full_bwt = std::vector<sym_t>();
-        full_sa = std::vector<uint8_t>();
-        full_lcp = std::vector<uint8_t>();
-    }
+    void release();
 
     // empties the chunk; the first BWT position of the chunk is start
     void clear(uint64_t start)
@@ -277,19 +270,7 @@ struct merge_heaps {
  * @param later later(a, b) = true <=> a is larger than b
  */
 template <typename val_t, typename later_t>
-inline void sift_down_first(std::vector<val_t>& heap, later_t later)
-{
-    uint64_t q = 0;
-
-    while (true) {
-        uint64_t c = 2 * q + 1;
-        if (c >= heap.size()) break;
-        if (c + 1 < heap.size() && later(heap[c], heap[c + 1])) c++;
-        if (!later(heap[q], heap[c])) break;
-        std::swap(heap[q], heap[c]);
-        q = c;
-    }
-}
+inline void sift_down_first(std::vector<val_t>& heap, later_t later);
 
 /* number of dictionary suffixes ahead of the processed one whose words are fetched into the cache; the data of their
    words and the symbols before them are fetched half as many ahead, the rows of Psi of their words a quarter as many
