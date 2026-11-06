@@ -158,7 +158,7 @@ public:
  */
 class decompressor {
 private:
-    using mlf_t = move_data_structure<POS, UNI>;
+    using mlf_t = move_data_structure<CACHE_LINES, UNI>;
 
     uint64_t n = 0; // n, the length of the text
     std::array<uint8_t, num_byte_values + 1> byte_of {}; // [1..sigma] byte_of[c] = the byte with the code c

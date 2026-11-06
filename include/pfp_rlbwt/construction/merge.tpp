@@ -650,7 +650,7 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(const idx_t* chunk_sa, uint64_t beg
                         if (classes.size() > 1) bound = heap[classes[1].beg].next_rank;
                         if (classes.size() > 2) bound = std::min<uint64_t>(bound, heap[classes[2].beg].next_rank);
                         const auto first = heap.begin() + cl.beg;
-                        const bwt_pos first_pos { x, len, first->next_rank, 0, first->cur };
+                        const bwt_pos first_pos { x, len, uint64_t(first->next_rank), 0, uint64_t(first->cur) };
                         // the number of ranks taken and the largest next rank taken, last = psi[last_rank]
                         uint64_t cnt = 0, last = 0, last_rank = 0;
 
@@ -696,7 +696,7 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(const idx_t* chunk_sa, uint64_t beg
                         if (heap.size() > 2) bound = std::min<uint64_t>(bound, heap[2].next_rank);
                         const uint64_t z = skip(top, bound), e = psi.p(z);
                         append_positions(out, sym_of(top.member), e - top.cur,
-                            bwt_pos { x, len, top.next_rank, 0, top.cur }, pos_in(e - 1, z - 1), top.cur);
+                            bwt_pos { x, len, uint64_t(top.next_rank), 0, uint64_t(top.cur) }, pos_in(e - 1, z - 1), top.cur);
                         top.cur = idx_t(e);
                         top.x = idx_t(z);
 
@@ -710,8 +710,9 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(const idx_t* chunk_sa, uint64_t beg
                     }
 
                     const range_t& l = heap.front();
-                    append_positions(out, sym_of(l.member), l.end - l.cur, bwt_pos { x, len, l.next_rank, 0, l.cur },
-                        pos_in(l.end - 1, l.end_x - 1), l.cur);
+                    append_positions(out, sym_of(l.member), l.end - l.cur,
+                        bwt_pos { x, len, uint64_t(l.next_rank), 0, uint64_t(l.cur) }, pos_in(l.end - 1, l.end_x - 1),
+                        l.cur);
                 }
 
                 if (heap.capacity() > kept_heap_entries) {
@@ -1068,6 +1069,35 @@ uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const
     const uint64_t r = writer.finish();
     m.close_full_files();
     return r;
+}
+
+} // namespace pfp_rlbwt
+
+namespace pfp_rlbwt {
+
+template <typename sym_t>
+inline void chunk_runs<sym_t>::release()
+{
+    records = no_init_vector<uint8_t>();
+    run_starts = std::vector<run_start_values>();
+    full_bwt = std::vector<sym_t>();
+    full_sa = std::vector<uint8_t>();
+    full_lcp = std::vector<uint8_t>();
+}
+
+template <typename val_t, typename later_t>
+inline void sift_down_first(std::vector<val_t>& heap, later_t later)
+{
+    uint64_t q = 0;
+
+    while (true) {
+        uint64_t c = 2 * q + 1;
+        if (c >= heap.size()) break;
+        if (c + 1 < heap.size() && later(heap[c], heap[c + 1])) c++;
+        if (!later(heap[q], heap[c])) break;
+        std::swap(heap[q], heap[c]);
+        q = c;
+    }
 }
 
 } // namespace pfp_rlbwt
