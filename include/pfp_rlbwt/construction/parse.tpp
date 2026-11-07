@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file parse.tpp
+ * @brief the methods of the prefix-free parsing: parsing ranges, the trigger seed and counting and renaming symbols
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PARSE_TPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PARSE_TPP
 

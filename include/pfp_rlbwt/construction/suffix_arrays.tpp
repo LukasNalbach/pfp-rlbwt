@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file suffix_arrays.tpp
+ * @brief the methods of the suffix arrays of the construction
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_SUFFIX_ARRAYS_TPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_SUFFIX_ARRAYS_TPP
 

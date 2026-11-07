@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file common.hpp
+ * @brief common parts of the construction: arrays with a fixed byte width per value, block vectors and the output
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_COMMON_HPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_COMMON_HPP
 

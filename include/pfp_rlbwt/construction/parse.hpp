@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file parse.hpp
+ * @brief the prefix-free parsing: the dictionary, the word ids and the phrase runs
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PARSE_HPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PARSE_HPP
 

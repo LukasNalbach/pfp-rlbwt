@@ -37,13 +37,13 @@ cmake --build build -j
 [move-data-structure](https://github.com/LukasNalbach/move-data-structure). The command-line tools are written to
 `build/cli/` and the tests to `build/tests/`.
 
-| Option | Description |
-| --- | --- |
-| `PFP_RLBWT_BUILD_CLI` | build `pfp-rlbwt` |
-| `PFP_RLBWT_BUILD_COMP`, `PFP_RLBWT_BUILD_COMP_CLI` | build the compressor library `pfp_rlbwt_comp` and `pfp-rlbwt-comp` |
-| `PFP_RLBWT_BUILD_TESTS` | build the tests (`OFF`) |
+| Option | Default | Description |
+| --- | --- | --- |
+| `PFP_RLBWT_BUILD_CLI` | `ON` if pfp-rlbwt is the top-level project, else `OFF` | build `pfp-rlbwt` |
+| `PFP_RLBWT_BUILD_COMP`, `PFP_RLBWT_BUILD_COMP_CLI` | `ON` if pfp-rlbwt is the top-level project, else `OFF` | build the compressor library `pfp_rlbwt_comp` and `pfp-rlbwt-comp` |
+| `PFP_RLBWT_BUILD_TESTS` | `OFF` | build the tests |
 
-The other options are `ON` if pfp-rlbwt is the top-level project. The general options and environment variables
+The general options and environment variables
 (`PFP_RLBWT_MARCH_NATIVE`, `PFP_RLBWT_TMPDIR`, ...) are described in string-utils.
 
 ### macOS

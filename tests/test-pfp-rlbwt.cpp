@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file test-pfp-rlbwt.cpp
+ * @brief fuzz tests of pfp_rlbwt::build
+ */
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>

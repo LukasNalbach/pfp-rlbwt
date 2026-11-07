@@ -24,7 +24,10 @@
  * SOFTWARE.
  */
 
-// the construction of Psi as a move data structure (see psi_mds), which does not depend on the symbol type
+/**
+ * @file psi_mds.cpp
+ * @brief the construction of Psi as a move data structure (see psi_mds), which does not depend on the symbol type
+ */
 
 #include <array>
 
