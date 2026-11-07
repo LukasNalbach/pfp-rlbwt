@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file types.hpp
+ * @brief the parameters and the result of the construction
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_TYPES_HPP
 #define PFP_RLBWT_PFP_RLBWT_TYPES_HPP
 

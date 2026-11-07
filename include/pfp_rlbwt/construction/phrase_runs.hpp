@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file phrase_runs.hpp
+ * @brief the phrase runs of the words of the dictionary
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PHRASE_RUNS_HPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_PHRASE_RUNS_HPP
 

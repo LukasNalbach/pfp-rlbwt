@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file text_ranges.hpp
+ * @brief the text split into ranges that threads read at the same time
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_TEXT_RANGES_HPP
 #define PFP_RLBWT_PFP_RLBWT_TEXT_RANGES_HPP
 

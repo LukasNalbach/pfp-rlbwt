@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file merge.hpp
+ * @brief the merge of the prefix-free parsing: the BWT runs, the PLCP samples and the LCP values
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_MERGE_HPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_MERGE_HPP
 

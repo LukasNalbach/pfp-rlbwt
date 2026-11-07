@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file fasta.hpp
+ * @brief the text of a FASTA file as the input of pfp_rlbwt::build
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_FASTA_HPP
 #define PFP_RLBWT_PFP_RLBWT_FASTA_HPP
 

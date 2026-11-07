@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file pfp_rlbwt.tpp
+ * @brief pfp_rlbwt::build: the parameters, the levels and the output
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_PFP_RLBWT_TPP
 #define PFP_RLBWT_PFP_RLBWT_PFP_RLBWT_TPP
 

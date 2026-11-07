@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file merge.tpp
+ * @brief the methods of the merge: LCP values, BWT positions and the output writer
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_MERGE_TPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_MERGE_TPP
 

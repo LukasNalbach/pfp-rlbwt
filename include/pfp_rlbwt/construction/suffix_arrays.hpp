@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file suffix_arrays.hpp
+ * @brief the suffix arrays of the dictionary and of the parse, and Psi as a move data structure
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_SUFFIX_ARRAYS_HPP
 #define PFP_RLBWT_PFP_RLBWT_CONSTRUCTION_SUFFIX_ARRAYS_HPP
 

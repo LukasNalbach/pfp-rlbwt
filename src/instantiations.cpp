@@ -24,9 +24,12 @@
  * SOFTWARE.
  */
 
-// explicit instantiations of pfp_rlbwt::build, of the text sources and of the levels of the recursive prefix-free
-// parsing for one symbol type; this file is compiled once per symbol width (PFP_RLBWT_SYMBOL_BYTES in [1, 8], see
-// CMakeLists.txt)
+/**
+ * @file instantiations.cpp
+ * @brief explicit instantiations of pfp_rlbwt::build, of the text sources and of the levels of the recursive
+ *        prefix-free parsing for one symbol type; this file is compiled once per symbol width (PFP_RLBWT_SYMBOL_BYTES
+ *        in [1, 8], see CMakeLists.txt)
+ */
 
 #include <pfp_rlbwt/pfp_rlbwt.hpp>
 

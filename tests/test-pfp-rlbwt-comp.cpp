@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file test-pfp-rlbwt-comp.cpp
+ * @brief fuzz tests of the compressor pfp-rlbwt-comp
+ */
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>

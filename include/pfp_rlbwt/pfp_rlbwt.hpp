@@ -24,6 +24,11 @@
  * SOFTWARE.
  */
 
+/**
+ * @file pfp_rlbwt.hpp
+ * @brief builds the run-length encoded BWT of a text with prefix-free parsing
+ */
+
 #ifndef PFP_RLBWT_PFP_RLBWT_PFP_RLBWT_HPP
 #define PFP_RLBWT_PFP_RLBWT_PFP_RLBWT_HPP
 
