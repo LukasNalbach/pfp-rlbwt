@@ -378,7 +378,7 @@ inline void build_psi_from_array(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_
     for (const auto& [i, letter] : arr.repeated_run_letters) value_start[letter + 2]++;
     for (uint64_t v = 0; v < num_values; v++) value_start[v + 1] += value_start[v];
 
-    // part t of p parts processes the ranks [t * (J+1) / p, (t+1) * (J+1) / p)
+    // part t of p parts consists of the ranks [t * (J+1) / p, (t+1) * (J+1) / p)
     const uint64_t p = std::max<uint64_t>(1, std::min<uint64_t>(threads, J + 1));
     auto part_start = [&](uint64_t t) { return (t * (J + 1)) / p; };
 

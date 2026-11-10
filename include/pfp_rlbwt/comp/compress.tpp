@@ -207,7 +207,7 @@ inline void append_rlbwt(uint64_t n, const byte_set& occurs, make_source_t make_
 
     prog.finish();
 
-    // smallest[g] and run_of[g] become the smallest SA value in range g at a run start and its run
+    // smallest[g] and run_of[g] are set to the smallest SA value in range g at a run start and its run
     for (uint64_t t = 1; t < threads; t++) {
         for (uint64_t g = 0; g < k; g++) {
             if (smallest[t * k + g] < smallest[g]) {

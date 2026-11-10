@@ -298,8 +298,8 @@ public:
     }
 };
 
-// number of bytes of the full BWT, SA and LCP array a chunk collects before they are written to their file, and of
-// the records the runs file is written in
+// number of bytes of the full BWT, SA and LCP array that are collected for a chunk before they are written to their
+// file, and of the blocks of records in which the runs file is written
 constexpr uint64_t write_buffer_bytes = uint64_t { 1 } << 20;
 
 /**
@@ -371,8 +371,8 @@ public:
 };
 
 /* the level of the recursive prefix-free parsing that the calling thread computes (1: the text, k >= 2: the parse of
-   level k - 1, see build_level); it selects the names in the log (see level_name), the number of symbols read at once
-   and where the temporary arrays are kept. It is 1 in the threads that a construction starts (read it before). */
+   level k - 1, see build_level); the names in the log (see level_name), the number of symbols read at once and where
+   the temporary arrays are kept depend on it. It is 1 in the threads that a construction starts (read it before). */
 inline thread_local uint64_t current_level = 1;
 
 // returns the name of a structure of the current level in the log: name on level 1, name_k on level k >= 2

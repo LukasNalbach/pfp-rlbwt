@@ -123,7 +123,7 @@ private:
     uint64_t file_size = 0; // size of the FASTA file
     fasta_transform transform; // the transformation
     map_fnc_t map_of; // computes the map of the symbols (none if empty)
-    merge_fnc_t merge; // receives the results of the ranges (none if empty)
+    merge_fnc_t merge; // is called with the results of the ranges (none if empty)
     uint64_t sample_period; // a sample every sample_period positions of a range (0: none)
     std::vector<fasta_range_bound> bounds; // [0..p] the starts of the ranges; bounds[p] is at the end of the file
     std::vector<chunk_t> chunks; // [0..p-1] the results of the scans of the ranges
@@ -162,7 +162,7 @@ public:
      * @param transform the transformation
      * @param map_of computes the map of the symbols from the result of the scan (the symbols keep their values if it
      *        is empty)
-     * @param merge receives the result of the scan of each range (see merge_fnc_t; nothing if empty)
+     * @param merge is called with the result of the scan of each range (see merge_fnc_t; nothing if empty)
      * @param sample_period a sample every sample_period positions of a range (0: none, see fasta_sample)
      */
     fasta_ranges(const std::string& path, const fasta_transform& transform, map_fnc_t map_of = {},

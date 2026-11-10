@@ -327,7 +327,7 @@ struct dictionary_sa {
      * @param file a reader of sa_file (with sizeof(idx_t) bytes per value)
      * @param beg first rank
      * @param end rank after the last one
-     * @param values receives SA[beg..end-1]
+     * @param values is set to SA[beg..end-1]
      */
     static void read_sa(array_reader& file, uint64_t beg, uint64_t end, no_init_vector<idx_t>& values)
     {
@@ -347,7 +347,7 @@ inline uint64_t dictionary_alphabet_size(const dictionary<sym_t>& dict, uint64_t
     else return dict.num_words + (max_symbol < dict.size ? max_symbol + 1 : dict.size);
 }
 
-// entries of extra space (libsais: fs) per alphabet value that hold all bucket arrays of libsais
+// entries of extra space (libsais: fs) per alphabet value in which all bucket arrays of libsais fit
 constexpr uint64_t free_space_per_value = 6;
 
 // extra space (libsais: fs) at the end of the suffix array that libsais uses for a byte alphabet
@@ -381,7 +381,7 @@ void build_repeated_word_ranks(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>
 /**
  * @brief computes the starts C of the ranges of ranks of the suffixes of the parse of the phrase runs per first word
  *        (see parse_sa::C) and the number of words
- * @param psa receives C and the number of words
+ * @param psa C and the number of words are stored in it
  * @param arr the phrase runs (the repeated words)
  * @param J number of phrase runs
  * @param dict the dictionary
@@ -446,7 +446,7 @@ struct value_rows {
 
 /**
  * @brief computes the input intervals of Psi that start at the ranks C (see parse_sa::C_intervals)
- * @param psa the suffix array of the parse of the phrase runs (C and Psi); receives C_intervals
+ * @param psa the suffix array of the parse of the phrase runs (C and Psi); C_intervals is stored in it
  * @param threads number of threads
  */
 template <typename idx_t>
@@ -457,8 +457,8 @@ void build_word_intervals(parse_sa<idx_t>& psa, uint16_t threads);
  *        their values (see parse_sa::bwt_runs) and the symbols of the values (see phrase_arrays::value_symbols) from
  *        Psi as an array: the intervals of Psi are the maximal ranges of the ranks of one value that Psi maps to
  *        consecutive ranks, i.e., to a run of the BWT
- * @param psa the suffix array of the parse of the phrase runs (C); receives Psi and the runs
- * @param arr the phrase runs (the letters of the repeated words); receives the symbols of the values
+ * @param psa the suffix array of the parse of the phrase runs (C); Psi and the runs are stored in it
+ * @param arr the phrase runs (the letters of the repeated words); the symbols of the values are stored in it
  * @param psi [0..J] Psi
  * @param J number of phrase runs
  * @param w length of a trigger string

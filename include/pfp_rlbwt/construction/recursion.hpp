@@ -60,7 +60,8 @@ namespace pfp_rlbwt {
  * @param text the text T (all symbols >= min_symbol)
  * @param prefix path prefix of the temporary files
  * @param prm parameters (the format is plain; no LCP samples, full BWT, full LCP array or extra sections)
- * @param out receives the runs, the suffix array and their number; out.parsed can stop the level after its parsing
+ * @param out the runs, the suffix array and their number are stored in it; with out.parsed, the level can be stopped
+ *        after its parsing
  */
 template <typename sym_t>
 void build_level(const text_source<sym_t>& text, const std::string& prefix, const params& prm, level_output& out);
@@ -89,7 +90,7 @@ inline uint64_t record_value(const level_output& out, uint64_t k)
 
 /**
  * @brief marks the first positions of the runs of the BWT of T'$ (see parse_sa::bwt_runs)
- * @param psa receives the marks
+ * @param psa the marks are stored in it
  * @param out the runs (see level_output)
  * @param J number of phrase runs
  * @param threads number of threads
@@ -139,7 +140,7 @@ void for_each_run_by_value(const level_output& out, uint64_t J, uint64_t num_val
 
     first_of_value = std::vector<uint64_t>();
 
-    // part t of p parts processes the runs order[part_first[t]..part_first[t+1]-1], from the rank part_rank[t] on
+    // part t of p parts consists of the runs order[part_first[t]..part_first[t+1]-1], from the rank part_rank[t] on
     const uint64_t p = std::max<uint64_t>(1, std::min<uint64_t>(threads, r));
     std::vector<uint64_t> part_first(p + 1), part_rank(p + 1, 0);
     for (uint64_t t = 0; t <= p; t++) part_first[t] = (t * r) / p;
@@ -169,7 +170,7 @@ void for_each_run_by_value(const level_output& out, uint64_t J, uint64_t num_val
 /**
  * @brief builds Psi (see psi_mds) and the values of the runs of the BWT of P (see parse_sa::bwt_run_values) from the
  *        runs of the BWT of T'$
- * @param psa receives Psi and the values
+ * @param psa Psi and the values are stored in it
  * @param arr the phrase runs (the letters of the repeated words)
  * @param out the runs (see level_output)
  * @param J number of phrase runs
@@ -182,7 +183,7 @@ void build_psi_and_run_values(parse_sa<idx_t>& psa, const phrase_arrays<idx_t, s
     uint64_t J, uint64_t w, const dictionary<sym_t>& dict, uint16_t threads)
 {
     const uint64_t num_values = arr.num_letters + 1;
-    // the run of position a with the value v is the image of the ranks [y, y + len), whose rows are the ones of v
+    // the run of position a with the value v is the image of the ranks [y, y + len), whose rows are the rows of v
     const value_rows by_value(arr, w, dict);
     mds_pairs pairs(out.r, J + 1);
     value_rows::rows_t rows = by_value.new_rows(out.r, threads);
@@ -206,7 +207,7 @@ void build_psi_and_run_values(parse_sa<idx_t>& psa, const phrase_arrays<idx_t, s
  * @brief computes the sampled ends of the phrase runs by rank (see sampled_ends) from the runs of the BWT of T'$ with
  *        their SA samples and from SA of T'$ at the ranks of the runs of the repeated words; reads the ends of the
  *        phrase runs in text order once and removes them
- * @param psa receives the sampled ends (psa.ends)
+ * @param psa the sampled ends are stored in it (psa.ends)
  * @param arr the phrase runs (the ends in text order)
  * @param out the runs with SA samples (see level_output)
  * @param ranges the ranges [beg, end) of the ranks of the runs of the repeated words, in increasing order
@@ -246,7 +247,8 @@ void build_sampled_ends(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>& arr, 
     samples.values = uint_array(4 * r, bytes);
     samples.repeated_ends = uint_array(num_repeated_ranks, bytes);
 
-    // thread t of p threads answers the requests [t * size / p, (t+1) * size / p), reading the ends in increasing order
+    // thread t of p threads processes the requests [t * size / p, (t+1) * size / p) and reads the ends in increasing
+    // order
     run_on_threads(threads, [&](uint64_t t, uint64_t p) {
         const uint64_t beg = (t * requests.size()) / p, end = ((t + 1) * requests.size()) / p;
         if (beg >= end) return;
@@ -283,8 +285,9 @@ void build_sampled_ends(parse_sa<idx_t>& psa, phrase_arrays<idx_t, sym_t>& arr, 
  * @param prefix path prefix of the temporary files of the next level
  * @param prm parameters (threads, logging and the recursion)
  * @param time phase timer (see log_phase_start)
- * @param out receives the runs of the BWT of T'$ (see level_output), from which build_psi_from_runs computes Psi; if
- *        out.completed is false, the PFP of T' is larger than half of T', P is not sorted and the word ids are kept
+ * @param out the runs of the BWT of T'$ are stored in it (see level_output); build_psi_from_runs computes Psi from
+ *        them. If out.completed is false, the PFP of T' is larger than half of T', P is not sorted and the word ids
+ *        are kept
  * @return the suffix array of the parse of the phrase runs without Psi
  */
 template <typename idx_t, typename sym_t>
@@ -297,8 +300,8 @@ parse_sa<idx_t> sort_parse_recursively(phrase_arrays<idx_t, sym_t>& arr, uint64_
     parse_sa<idx_t> psa;
     build_word_ranges(psa, arr, J, dict);
 
-    /* without the full SA and LCP array, the ends of the phrase runs by rank are sampled (see sampled_ends): the next
-       level computes the SA samples and SA at the ranks of the runs of the repeated words */
+    /* without the full SA and LCP array, the ends of the phrase runs by rank are sampled (see sampled_ends): on the
+       next level, the SA samples and SA at the ranks of the runs of the repeated words are computed */
     const bool sampled = !prm.write_sa && !prm.write_lcp;
     // the ranges [beg, end) of the ranks of the runs of the repeated words, in increasing order (if sampled)
     std::vector<std::pair<uint64_t, uint64_t>> repeated_ranges;
@@ -325,8 +328,8 @@ parse_sa<idx_t> sort_parse_recursively(phrase_arrays<idx_t, sym_t>& arr, uint64_
     level_prm.extra_sections.clear();
     const std::string level_prefix = prefix + "_" + std::to_string(current_level + 1);
 
-    /* the next level writes SA of P to ends_by_rank (allocated once the word ids are freed), whose values become the
-       ends below, or its values at the ranks of the runs of the repeated words to repeated_sa */
+    /* on the next level, SA of P is written to ends_by_rank (allocated once the word ids are freed), whose values are
+       replaced by the ends below, or only its values at the ranks of the runs of the repeated words to repeated_sa */
     out.sa = sampled ? &repeated_sa : &arr.ends_by_rank;
     out.sa_ranges = repeated_ranges;
 
@@ -364,7 +367,7 @@ parse_sa<idx_t> sort_parse_recursively(phrase_arrays<idx_t, sym_t>& arr, uint64_
     if (sampled) {
         build_sampled_ends(psa, arr, out, std::move(repeated_ranges), repeated_sa, J, w, threads);
         repeated_sa = uint_array();
-        // the records keep only the starts and the symbols of the runs
+        // the records contain only the starts and the symbols of the runs
         const record_layout with_samples = out.layout;
         out.layout = record_layout(with_samples.position_bytes, with_samples.symbol_bytes, false, false);
 
@@ -394,7 +397,7 @@ parse_sa<idx_t> sort_parse_recursively(phrase_arrays<idx_t, sym_t>& arr, uint64_
             arr.ends_file.remove();
         }
 
-        // ends_by_rank[x] = SA[x] (written by the next level) becomes F_{SA[x]-1}, with F_{-1} = w - 1
+        // ends_by_rank[x] = SA[x] (written on the next level) is replaced by F_{SA[x]-1}, with F_{-1} = w - 1
         #pragma omp parallel for num_threads(threads)
         for (uint64_t x = 0; x <= J; x++) {
             const uint64_t v = arr.ends_by_rank[x];

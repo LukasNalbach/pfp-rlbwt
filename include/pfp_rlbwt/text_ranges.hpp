@@ -93,8 +93,8 @@ public:
     virtual bool needs_frequencies() const { return false; }
 
     /**
-     * @brief called after every range has been read to its end; returns the map that the symbols of T are renamed by
-     *        (only for symbols of one byte), or nullptr if they keep their values
+     * @brief called after every range has been read to its end; returns the map by which the symbols of T are renamed
+     *        (only for symbols of one byte), or nullptr if they are not renamed
      * @param freq if needs_frequencies(), [0..255] freq[c] = the number of occurrences of c in T, else nullptr
      */
     virtual const std::array<uint8_t, 256>* ranges_read(const std::array<uint64_t, 256>* /* freq */) { return nullptr; }

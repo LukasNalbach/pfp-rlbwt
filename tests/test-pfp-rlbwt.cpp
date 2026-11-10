@@ -266,7 +266,7 @@ void check_output(const std::string& prefix, const std::vector<sym_t>& text, con
     EXPECT_EQ(result.n_with_terminator, n);
     ASSERT_EQ(result.r, r);
 
-    // the runs file stores exactly the sections of its format, and the temporary files are removed
+    // the runs file contains exactly the sections of its format, and the temporary files are removed
     const std::string runs = prefix + pfp_rlbwt::ext_runs;
     pfp_rlbwt::run_data_file file;
     ASSERT_TRUE(file.open(runs));
@@ -449,7 +449,7 @@ pfp_rlbwt::params random_params()
         params.recursion_min_phrase_runs = random_in(0, max_recursion_min_runs);
     }
 
-    // 0 (the fewest bytes) or any width in [min_value_bytes..max_value_bytes]
+    // 0 (the smallest number of bytes) or any width in [min_value_bytes..max_value_bytes]
     params.position_bytes = random_in(0, 1) == 0 ? 0 : random_in(pfp_rlbwt::min_value_bytes, pfp_rlbwt::max_value_bytes);
 
     // up to max_extra_sections extra sections with distinct identifiers and random bytes
@@ -521,8 +521,8 @@ byte_input random_byte_input(bool repetitive)
 
 /* builds the output for a byte file with the given parameters as pfp-rlbwt does (see rlbwt::build_byte_file), read
    reversed with probability 1/2, and compares it with the expected output for its text, whose bytes are replaced by
-   their ranks among the distinct bytes plus min_symbol if one is below min_symbol; then the runs file stores these
-   bytes (see section_byte_map) */
+   their ranks among the distinct bytes plus min_symbol if one is below min_symbol; these bytes are then stored in the
+   runs file (see section_byte_map) */
 void verify_byte_input(const byte_input& input, pfp_rlbwt::params params)
 {
     const std::string path = temporary_file_path("pfp-rlbwt-test-input-");

@@ -92,8 +92,8 @@ public:
 };
 
 /**
- * @brief a sequence A[0..t-1] of distinct values in [0..u-1] that answers, for a prefix A[0..len-1], the k-th
- *        smallest value and the number of values smaller than x (a wavelet matrix)
+ * @brief a sequence A[0..t-1] of distinct values in [0..u-1] (a wavelet matrix) with queries for the k-th smallest
+ *        value of a prefix A[0..len-1] and for the number of values in it that are smaller than x
  */
 class prefix_wavelet {
 private:

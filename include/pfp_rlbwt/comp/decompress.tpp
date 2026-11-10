@@ -81,9 +81,9 @@ inline no_init_vector<uint8_t> read_file(const std::string& path)
 
 /**
  * @brief writes bytes that are reported from right to left to consecutive positions of a file with O_DIRECT (see
- *        direct_positioned_file), through a buffer that holds a window of the file starting at a multiple of the sector
- *        size; writers of disjoint ranges of the file can be used by different threads (each writer is aligned to a
- *        cache line)
+ *        direct_positioned_file), through a buffer that stores a window of the file starting at a multiple of the
+ *        sector size; writers of disjoint ranges of the file can be used by different threads (each writer is aligned
+ *        to a cache line)
  */
 class alignas(cache_line_bytes) backward_writer {
 private:
@@ -238,7 +238,8 @@ public:
         auto block_start = [&](uint64_t b) { return uint64_t((uint128_t(b) * r) / num_blocks); };
 
         /* the pairs (i, LF(i)) of the run starts i, and the codes of the runs: 8 bits per code if they fit into a
-           byte (then they order the pairs by LF(i)), else the bit width of sigma */
+           byte (then the pairs are ordered by LF(i) with them as keys, see mds_params::q_order_keys), else the bit
+           width of sigma */
         const uint8_t code_width =
             sigma < num_byte_values ? std::numeric_limits<uint8_t>::digits : std::bit_width(sigma);
         mds_pairs I(r, N);
@@ -286,8 +287,8 @@ public:
 
         prog.finish();
 
-        // block_size[b] becomes the first BWT row of block b; LF(i) = C[c] + rank(L, c, i - 1) for the start i of a
-        // run of c
+        // block_size[b] is replaced by the first BWT row of block b; LF(i) = C[c] + rank(L, c, i - 1) for the start i
+        // of a run of c
         uint64_t rows = 0;
 
         for (uint64_t b = 0; b < num_blocks; b++) {

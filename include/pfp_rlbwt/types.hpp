@@ -47,7 +47,7 @@ struct params : output_params {
     uint64_t modulus = 100; // a window is a trigger string with probability 1/modulus
     uint16_t num_threads = 1; // number of threads
     uint8_t position_bytes = 0; // bytes per text position in the arrays of the construction, in [4..6] (0: the
-                                // fewest that hold |T| + window)
+                                // smallest number in which |T| + window fits)
     /* recursive: the parse is suffix-sorted with the prefix-free parsing of the parse (whose window and modulus are
        recursion_window and recursion_modulus), if it has at least recursion_min_phrase_runs phrase runs, at most half
        as many as the text has symbols and its prefix-free parsing is at most half as large as it; and so on for the

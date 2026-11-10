@@ -213,8 +213,8 @@ inline uint64_t parse_phrases_in_range(typename text_ranges<sym_t>::reader& in, 
     // the position after the range (unknown_length until the reader has passed the end of the range)
     uint64_t range_end = text_ranges<sym_t>::unknown_length;
     uint64_t max_sym = 0;
-    /* the w symbols before the current block (0 before the range): w_before[i] leaves the window when block[i] enters
-       it, for i < w (for i >= w, block[i - w] leaves it) */
+    /* the w symbols before the current block (0 before the range): w_before[i] is removed from the window when
+       block[i] is appended to it, for i < w (for i >= w, block[i - w] is removed) */
     std::vector<sym_t> w_before(w, 0);
 
     std::vector<sym_t> run_phrase; // the phrase of the last phrase run, if it is not yet appended to out
@@ -330,7 +330,8 @@ inline uint64_t parse_phrases_in_range(typename text_ranges<sym_t>::reader& in, 
             return false;
         };
 
-        // the positions before check_from complete the first window; from in_block on, block[i - w] leaves the window
+        // the positions before check_from complete the first window; from in_block on, block[i - w] is removed from the
+        // window
         const uint64_t first_check = std::min(len, check_from - std::min(check_from, x));
         const uint64_t in_block = std::max(first_check, std::min(len, w));
         for (uint64_t i = 0; i < first_check; i++) window.add(block[i], w_before[i]);
@@ -474,7 +475,7 @@ inline parsing<sym_t> parse(text_ranges<sym_t>& text, const params& prm, uint64_
     phase_progress prog(prm.log, text.max_size());
     const uint64_t block_len = block_symbols<sym_t>(); // evaluated in this thread (see current_level)
 
-    // part i parses the phrases starting in range i and part 0 also the one starting at 0
+    // in part i, the phrases starting in range i are parsed, in part 0 also the one starting at 0
     run_on_threads(p, [&](uint64_t t, uint64_t team_size) {
         for (uint64_t i = t; i < p; i += team_size) {
             std::unique_ptr<typename text_ranges<sym_t>::reader> in = text.open(i, &prog);

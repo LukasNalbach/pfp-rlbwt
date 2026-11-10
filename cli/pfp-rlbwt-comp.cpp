@@ -46,7 +46,7 @@ namespace {
 constexpr compressor_spec spec {
     .name = "pfp-rlbwt-comp",
     .ending = "rlbwt",
-    .description = "compresses a text into its run-length encoded BWT; -d restores it",
+    .description = "compresses a text into its run-length encoded BWT and restores it with -d",
     .fasta = true
 };
 

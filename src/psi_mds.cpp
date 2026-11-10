@@ -40,7 +40,7 @@ namespace pfp_rlbwt {
 psi_mds::psi_mds(mds_pairs&& pairs, uint64_t num_ranks, const interleaved_bit_aligned_vectors& words,
     const interleaved_bit_aligned_vectors& advances, uint16_t threads)
 {
-    // the balancing gives each piece of an interval the word and the advance of the interval
+    // in the balancing, each piece of an interval is assigned the word and the advance of the interval
     const std::array<mds_pair_row, 2> pair_rows { mds_pair_row { .values = &words },
         mds_pair_row { .values = &advances } };
     const mds_params prm { .num_threads = threads, .pair_rows = pair_rows.data() };

@@ -121,8 +121,9 @@ using run_start_values = std::pair<uint64_t, uint64_t>;
 /* the outputs of a level of the recursive prefix-free parsing (see build_level), which are kept in RAM instead of being
    written to the runs file and to the suffix array file */
 struct level_output {
-    uint_array* sa = nullptr; // if not nullptr, receives SA[0..n] of T$ (with params::write_sa)
-    // if not empty, sa receives only SA[beg..end-1] for each range [beg, end) (sorted and disjoint), one after another
+    uint_array* sa = nullptr; // if not nullptr, SA[0..n] of T$ is written to it (with params::write_sa)
+    // if not empty, only SA[beg..end-1] is written to sa for each range [beg, end) (sorted and disjoint), one after
+    // another
     std::vector<std::pair<uint64_t, uint64_t>> sa_ranges;
     // the records of the runs in the plain format: [0..r-1] record k = bytes [k * layout.bytes, (k+1) * layout.bytes)
     no_init_vector<uint8_t> records;
@@ -294,7 +295,7 @@ constexpr uint64_t kept_heap_entries = uint64_t { 1 } << 12;
  *        3. a group of equal proper suffixes of several words: the ranks of the parse suffixes after the words are
  *           merged with a heap (one run if all the words have the same symbol before the suffix and no full arrays
  *           are written; without full arrays, the words with the same symbol before the suffix are merged as one
- *           class, which takes all its ranks up to the next rank of another class at once).
+ *           class, whose ranks up to the next rank of another class are appended at once).
  *        The phrases of a word with a phrase run of two or more phrases (a repeated word) are ordered by the
  *        suffixes of the parse of the phrases starting at them (see repeated_word_ranks); for a group with such a
  *        word, the ranks of these suffixes after the phrases are merged.
@@ -503,7 +504,7 @@ private:
     // where the values at the starts of the runs are appended (nullptr: they are not collected)
     std::vector<run_start_values>* run_starts;
     direct_ofstream file; // the file of the records (not opened if the runs file is not written or kept in RAM)
-    no_init_vector<uint8_t>* memory_records = nullptr; // if not nullptr, receives the records instead of file
+    no_init_vector<uint8_t>* memory_records = nullptr; // if not nullptr, the records are written to it instead of file
     std::string file_name; // name of the runs file
     std::string records_name; // name of the file of the records
     uint64_t pos = 0; // BWT position of the first position of the next chunk
@@ -573,7 +574,8 @@ public:
  * @param writes_run_data true <=> the runs file is written (see ext_runs)
  * @param run_starts if not nullptr, the SA and LCP values at the starts of the runs are appended to it
  * @param plcp if not nullptr, the full LCP array is written, computed with this sampled PLCP array
- * @param level_out if not nullptr, receives the records and the suffix array instead of their files (see level_output)
+ * @param level_out if not nullptr, the records and the suffix array are written to it instead of to their files (see
+ *        level_output)
  * @return the number r of runs
  */
 template <typename sym_t, typename idx_t>

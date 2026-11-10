@@ -89,7 +89,7 @@ void print_help(std::ostream& out)
         "at least " + min_symbol_str + "; with 1, if a byte below " + min_symbol_str + " occurs, the distinct bytes "
         "are mapped to " + min_symbol_str + ", " + std::to_string(min_symbol + 1) + ", ... in increasing order (to "
         "16-bit symbols if more than " + std::to_string(num_byte_values - min_symbol) + " distinct bytes occur), the "
-        "BWT consists of the mapped bytes and <base_name>" + ext_runs + " stores the map (see the README)");
+        "BWT consists of the mapped bytes and the map is stored in <base_name>" + ext_runs + " (see the README)");
     h.option_fasta("FASTA mode (only with -symbol-bytes 1): replace each header line and each run of symbols outside "
         "the alphabet of -A (after upper-casing) with one separator symbol, skip the lines before the first header and "
         "drop carriage returns");
@@ -101,33 +101,35 @@ void print_help(std::ostream& out)
     h.option("-mod <m>", "integer >= 1 (default: " + std::to_string(defaults.modulus) + ")",
         "a window is a trigger string with probability 1/m");
     h.option("-pos-bytes <b>", "integer in [" + std::to_string(min_value_bytes) + ", " + std::to_string(max_value_bytes)
-        + "] (default: the fewest that hold n + w)", "the number of bytes per text position in the arrays of the "
-        "construction");
-    h.option("-recursive <r>", "on | off (default: on)", "on: suffix-sort the parse of the phrase runs with its "
-        "prefix-free parsing, recursively, as long as a parse has at least <j> phrase runs (-rec-min), at most half as "
-        "many as its text has symbols, and a prefix-free parsing at most half as large as it; off: with a suffix array "
-        "construction");
+        + "] (default: the smallest number in which n + w fits)", "the number of bytes per text position in the arrays "
+        "of the construction");
+    h.option("-recursive <r>", "on | off (default: on)", "how the parse of the phrase runs is suffix-sorted\n"
+        "on: with its prefix-free parsing, recursively, as long as a parse has at least <j> phrase runs (-rec-min), at "
+        "most half as many phrase runs as its text has symbols, and a prefix-free parsing at most half as large as the "
+        "parse\n"
+        "off: with a suffix array construction");
     h.option("-rec-w <w>", "integer >= 1 (default: " + std::to_string(defaults.recursion_window) + ")",
         "the length of a trigger string in the prefix-free parsings of the parses (-recursive on)");
     h.option("-rec-mod <m>", "integer >= 1 (default: " + std::to_string(defaults.recursion_modulus) + ")",
         "a window of a parse is a trigger string with probability 1/m (-recursive on)");
     h.option("-rec-min <j>", "integer >= 0 (default: " + std::to_string(defaults.recursion_min_phrase_runs) + ")",
-        "the fewest phrase runs of a parse that is parsed (-recursive on)");
+        "the smallest number of phrase runs of a parse that is suffix-sorted with its prefix-free parsing "
+        "(-recursive on)");
     h.group("output");
     h.option("-o <base_name>", "a path (default: <input_file>)", "the base name of the output files");
     h.option("-format <f>", "plain | compressed (default: plain)", std::string("the format of <base_name>") + ext_runs
-        + ": plain stores one record per run (its start, its symbol and its samples, each with a fixed number of "
-        "bytes); compressed stores the starts Elias-Fano coded and the symbols Huffman coded in blocks, the SA "
-        "samples bit-packed and the LCP samples with RLE-GEF, each readable with O(1) disk reads");
+        + "\nplain: one record per run (its start, its symbol and its samples, each with a fixed number of bytes)\n"
+        "compressed: the starts Elias-Fano coded and the symbols Huffman coded in blocks, the SA samples bit-packed "
+        "and the LCP samples with RLE-GEF, each readable with O(1) disk reads");
     h.option("-sa", "", std::string("also write the SA values at the starts and at the ends of the runs to <base_name>")
         + ext_runs);
     h.option("-lcp", "", std::string("also write the LCP values at the starts of the runs to <base_name>") + ext_runs);
     h.option("-full-bwt", "", std::string("write <base_name>") + ext_bwt + " (the BWT, one symbol per position, with "
         "the bytes per symbol of the input or of the mapped bytes)");
-    h.option("-full-sa", "", std::string("write <base_name>") + ext_sa + " (the suffix array, the fewest bytes per "
-        "value that hold n + 1)");
-    h.option("-full-lcp", "", std::string("write <base_name>") + ext_lcp + " (the LCP array, the fewest bytes per value "
-        "that hold n + 1)");
+    h.option("-full-sa", "", std::string("write <base_name>") + ext_sa + " (the suffix array, with the smallest number "
+        "of bytes per value in which n + 1 fits)");
+    h.option("-full-lcp", "", std::string("write <base_name>") + ext_lcp + " (the LCP array, with the smallest number "
+        "of bytes per value in which n + 1 fits)");
     h.group("execution");
     h.option_threads();
     h.group("measurement");

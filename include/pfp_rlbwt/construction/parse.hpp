@@ -102,8 +102,8 @@ inline uint64_t read_varint(reader_t& in);
 
 /**
  * @brief the word ids of the phrase runs a thread has found (see word_table), in blocks that grow as in block_vector; a
- *        block stores 3 bytes per id while the ids are below 2^24, and a larger id starts a block with 4 bytes per id,
- *        as do all blocks after it
+ *        block stores 3 bytes per id while the ids are below 2^24; with a larger id, a block with 4 bytes per id is
+ *        started, and all blocks after it also have 4 bytes per id
  */
 class word_id_vector {
 private:
@@ -243,8 +243,8 @@ struct repeated_word {
 template <typename idx_t, typename sym_t>
 struct phrase_arrays {
     /* the parse of the phrase runs (if it is not suffix-sorted recursively): [0..J] P[i] = 1 + letter of phrase run i;
-       P[J] = 0. The letters are ordered by word; the phrase runs of a word in repeated_words get one letter per key
-       (see run_key), the others one letter per word */
+       P[J] = 0. The letters are ordered by word; the phrase runs of a word in repeated_words are assigned one letter
+       per key (see run_key), the others one letter per word */
     malloc_array_t<idx_t> P;
     uint64_t num_letters = 0; // the number of letters
     uint8_t position_bytes = 0; // bytes per end of a phrase run
@@ -361,7 +361,7 @@ private:
     uint64_t threshold; // UINT64_MAX / modulus
     uint64_t pow_w = 1; // golden_ratio_64^w
     uint64_t hash = 0; // the hash of the window
-    uint64_t seed; // selects the trigger strings (see is_trigger)
+    uint64_t seed; // the seed on which the trigger strings depend (see is_trigger)
 
 public:
     rolling_window_hash(uint64_t w, uint64_t modulus, uint64_t seed) : threshold(UINT64_MAX / modulus), seed(seed)
@@ -369,7 +369,7 @@ public:
         for (uint64_t i = 0; i < w; i++) pow_w *= golden_ratio_64;
     }
 
-    // appends c to the window; out is the symbol w positions before c, which leaves it (0 if there is none)
+    // appends c to the window; out is the symbol w positions before c, which is removed from it (0 if there is none)
     inline void add(sym_t c, sym_t out) { hash = hash * golden_ratio_64 + uint64_t(c) - uint64_t(out) * pow_w; }
 
     // returns whether the window is a trigger string
@@ -401,9 +401,9 @@ struct word_entry {
 };
 
 /**
- * @brief the words found by the parsing threads: each distinct word gets an id (0, 1, ... in the order in which the
- *        words are found) and its occurrences are counted. A word is looked up by its hash in one of the shards,
- *        each a hash table (open addressing, at most half full) with its own mutex.
+ * @brief the words found by the parsing threads: each distinct word is assigned an id (0, 1, ... in the order in
+ *        which the words are found) and its occurrences are counted. A word is looked up by its hash in one of the
+ *        shards, each a hash table (open addressing, at most half full) with its own mutex.
  */
 template <typename sym_t>
 class word_table {
@@ -545,7 +545,7 @@ template <typename sym_t>
 std::array<uint64_t, 256> count_symbols(word_table<sym_t>& table, uint64_t w, uint16_t p);
 
 /**
- * @brief renames the symbols of T in the words of the parsing (the dollars keep their value)
+ * @brief renames the symbols of T in the words of the parsing (the dollars are not renamed)
  * @param table the word table
  * @param map [0..255] map[c] = the new name of the symbol c (at least min_symbol)
  * @param max_symbol (output) the largest symbol of the renamed words
@@ -581,7 +581,7 @@ void store_parse(phrase_arrays<idx_t, sym_t>& arr, uint64_t J, uint16_t threads)
 /**
  * @brief writes the ends of the phrase runs to a file (see phrase_arrays::ends_file) and assigns the letters of the
  *        phrase runs; without recursion, stores the letters in P and frees the word ids of the phrase runs, else keeps
- *        the word ids, from which the next level reads the letters (see letter_source)
+ *        the word ids, from which the letters are read on the next level (see letter_source)
  * @param prs the parsing
  * @param prefix path prefix of the file (see ext_phrase_run_ends)
  * @param threads number of threads

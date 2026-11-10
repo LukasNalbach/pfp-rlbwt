@@ -364,7 +364,7 @@ void bwt_merger<sym_t, idx_t>::append_repeated_group(chunk_runs<sym_t>& out, con
     auto sym_of = [&](uint64_t member) { return bwt_symbol<sym_t>(t[uint64_t(group[member]) - 1]); };
     // orders the ranges in heap by the rank of the suffix one phrase after their next one, the smallest first
     auto later = [](const repeated_range& a, const repeated_range& b) { return a.next_rank > b.next_rank; };
-    // the dictionary suffix of a position is the one of its own word (see lcp)
+    // the dictionary suffix of a position is the member of the group in its own word (see lcp)
     auto pos_of = [&](const repeated_range& r, uint64_t q) {
         return position(group[r.member], len, r.word, r.rw, q);
     };
@@ -625,8 +625,9 @@ void bwt_merger<sym_t, idx_t>::compute_chunk(const idx_t* chunk_sa, uint64_t beg
 
                 if (!prm.write_sa && plcp == nullptr) {
                     /* a run per stretch of ranks with the same symbol before the suffix: the ranges with the same
-                       symbol form a class with a heap, the classes form a heap by their next ranks, and the class with
-                       the smallest next rank takes all its ranks before the smallest next rank of the other classes */
+                       symbol form a class with a heap, the classes form a heap by their next ranks, and the ranks of
+                       the class with the smallest next rank that are before the smallest next rank of the other
+                       classes are appended at once */
                     std::vector<symbol_class>& classes = heaps.classes;
                     classes.clear();
 
@@ -840,13 +841,13 @@ void output_writer<sym_t, idx_t>::append_chunk(chunk_runs<sym_t>& chunk)
         pending_lcp = l;
     }
 
-    // the first run of the chunk ends inside the chunk: write it and the inner runs; the last run stays pending
+    // the first run of the chunk ends inside the chunk: write it and the inner runs; the last run is not written yet
     if (chunk.num_runs > 1) {
         write_pending(chunk.first_sa_end);
         max_length = std::max(max_length, chunk.max_inner_length);
 
         if (m.writes_run_data) {
-            // the starts of the records become BWT positions
+            // the starts of the records are converted to BWT positions
             for (uint64_t offset = 0; offset < chunk.records.size(); offset += layout.bytes) {
                 uint8_t* rec = chunk.records.data() + offset;
                 write_bytes(rec, pos + read_bytes(rec, layout.position_bytes), layout.position_bytes);
@@ -947,8 +948,8 @@ uint64_t merge(const parsing<sym_t>& prs, const dictionary_sa<idx_t>& dsa, const
         level_out);
     output_writer<sym_t, idx_t> writer(m, prefix, run_starts, level_out);
 
-    /* the chunks of the dictionary suffix array: [0..num_chunks] chunk c covers the ranks [bounds[c], bounds[c+1]);
-       a group of equal suffixes is not split */
+    /* the chunks of the dictionary suffix array: [0..num_chunks] chunk c consists of the ranks
+       [bounds[c], bounds[c+1]); a group of equal suffixes is not split */
     const uint64_t num_chunks = std::max<uint64_t>(1, std::min<uint64_t>(size, p * chunks_per_thread));
     std::vector<uint64_t> bounds(num_chunks + 1);
 

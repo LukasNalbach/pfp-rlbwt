@@ -86,7 +86,7 @@ inline std::string merge_phase_name(const params& prm, bool writes_run_data)
  * @param prs the parsing; its phrases are freed
  * @param prm parameters
  * @param prefix path prefix of the output files
- * @param level_out if not nullptr, receives the runs and the suffix array (see build_level)
+ * @param level_out if not nullptr, the runs and the suffix array are written to it (see build_level)
  * @return the number r of runs
  */
 template <typename sym_t, typename idx_t>
@@ -104,14 +104,15 @@ uint64_t build_from_parsing(parsing<sym_t>& prs, const params& prm, const std::s
     phrase_arrays<idx_t, sym_t> arr = build_phrase_arrays<idx_t, sym_t>(prs, prefix, p, recursive);
     log_phase_end(prm.log, time);
 
-    /* the suffix array of the dictionary is built before the one of P and stays on disk; if P is suffix-sorted
-       recursively, the next level runs before (it frees the word ids of the phrase runs) and Psi is built after */
+    /* the suffix array of the dictionary is built before that of P and is kept on disk; if P is suffix-sorted
+       recursively, the next level is computed before it (which frees the word ids of the phrase runs) and Psi after
+       it */
     parse_sa<idx_t> psa;
     level_output next_level; // the runs of the BWT of P, if P is suffix-sorted recursively
     if (recursive) {
         psa = sort_parse_recursively<idx_t, sym_t>(arr, J, prs.w, prs.dict, prefix, prm, time, next_level);
 
-        // the PFP of P does not halve P: P is suffix-sorted directly
+        // the PFP of P is larger than half of P: P is suffix-sorted directly
         if (!next_level.completed) {
             recursive = false;
             psa = parse_sa<idx_t>();
@@ -200,7 +201,7 @@ inline void fit_text_length(uint64_t n, params& prm)
  * @param text the text T
  * @param prefix path prefix of the output files
  * @param prm parameters (checked; position_bytes is set if the length of T is known, else after the parse)
- * @param level_out if not nullptr, receives the runs and the suffix array (see build_level)
+ * @param level_out if not nullptr, the runs and the suffix array are written to it (see build_level)
  * @return sizes of the parsing and of the output
  */
 template <typename sym_t>
@@ -210,8 +211,8 @@ result build_parsed(text_ranges<sym_t>& text, const std::string& prefix, params 
     log_phase_start(prm.log, time, current_level == 1 ? "building PFP" : "building PFP of " + level_text_name());
     text.split(prm.num_threads);
     const uint64_t seed = choose_trigger_seed<sym_t>(text, prm);
-    /* on a level after the first, level_out->parsed decides after the parse whether the level continues (see parse),
-       and a degenerate parse is not repeated (its prefix-free parsing does not halve the text) */
+    /* on a level after the first, the level is continued after the parse only if level_out->parsed returns true (see
+       parse), and a degenerate parse is not repeated (its prefix-free parsing is larger than half of the text) */
     bool stopped = false;
     std::function<bool(const result&)> parsed = [&](const result& sizes) {
         stopped = !level_out->parsed(sizes);
@@ -258,7 +259,7 @@ result build_parsed(text_ranges<sym_t>& text, const std::string& prefix, params 
 
     if (stopped) return res;
 
-    // the largest length and alphabet size of the inputs of libsais choose the type of the suffix arrays
+    // the type of the suffix arrays is chosen by the largest length and alphabet size of the inputs of libsais
     const uint64_t max_index = std::max({ res.num_phrase_runs + 1, res.dictionary_size,
         dictionary_alphabet_size(prs.dict, prs.max_symbol) });
 
